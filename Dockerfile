@@ -15,12 +15,17 @@ RUN       yum install -y wget && \
             gcc \
             gcc-c++
 
+RUN yum install -y boost-devel
+RUN yum install -y centos-release-scl && \
+    yum install -y devtoolset-7-gcc* && \
+    scl enable devtoolset-7 bash
+
 ADD     CMakeLists.txt .
 ADD     main.cpp .
 
 WORKDIR /root/highloadcup/build
 
-RUN     cmake3 .. && make -j4
+RUN     cmake3 .. -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ && make -j4
 
 EXPOSE 80
 

@@ -37,34 +37,37 @@ if(NOT httpxx_POPULATED)
   add_subdirectory(${httpxx_SOURCE_DIR} ${httpxx_BINARY_DIR})
 endif()
 
-
-FetchContent_Declare(
-  rapid_json
-  GIT_REPOSITORY ${RAPIDJSON_REPOSITORY}
-  GIT_TAG        ${RAPIDJSON_VERSION}
-)
-
-FetchContent_GetProperties(rapid_json)
-if(NOT rapid_json_POPULATED)
-  FetchContent_Populate(rapid_json)
-  add_subdirectory(${rapid_json_SOURCE_DIR} ${rapid_json_BINARY_DIR})
-endif()
+#
+#FetchContent_Declare(
+#  rapid_json
+#  GIT_REPOSITORY ${RAPIDJSON_REPOSITORY}
+#  GIT_TAG        ${RAPIDJSON_VERSION}
+#)
+#
+#FetchContent_GetProperties(rapid_json)
+#if(NOT rapid_json_POPULATED)
+#  FetchContent_Populate(rapid_json)
+#  add_subdirectory(${rapid_json_SOURCE_DIR} ${rapid_json_BINARY_DIR})
+#endif()
 
 add_executable(highloadcup main.cpp)
 
-find_package(RapidJSON REQUIRED)
+#find_package(RapidJSON REQUIRED)
 find_package(Threads REQUIRED)
+find_package(Boost REQUIRED COMPONENTS system thread)
 
 target_link_libraries(highloadcup
   PRIVATE
     GSL
     httpxx
     Threads::Threads
+    Boost::system
+    Boost::thread
 )
 
 
 target_include_directories(highloadcup
   PRIVATE
     ${httpxx_SOURCE_DIR}
-    ${rapid_json_SOURCE_DIR}/include
+#    ${rapid_json_SOURCE_DIR}/include
 )

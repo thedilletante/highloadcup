@@ -11,6 +11,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -26,11 +27,14 @@
 #include <httpxx/http-parser/http_parser.h>
 #include <memory>
 #include <chrono>
-
-#include <rapidjson/rapidjson.h>
-#include <rapidjson/reader.h>
+//
+//#include <rapidjson/rapidjson.h>
+//#include <rapidjson/reader.h>
 #include <atomic>
 #include <thread>
+
+#include <boost/variant.hpp>
+#include <boost/thread.hpp>
 
 namespace utils {
 
@@ -108,6 +112,7 @@ namespace utils {
   template <class T, size_t CAPACITY>
   class circular_fifo {
   public:
+
     bool push(T t) {
       auto head_value = head.load(std::memory_order_relaxed);
       const auto tail_value = tail.load(std::memory_order_acquire);
@@ -197,55 +202,137 @@ namespace tcp {
     virtual void deallocate(connection<BUFFER_SIZE>* c) = 0;
   };
 
+//template <size_t BUFFER_SIZE>
+//class server {
+//public:
+//
+//  explicit server(const char* ip, uint16_t port, size_t backlog)
+//    : server_socket { ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) } {
+//    if (server_socket == -1)
+//      throw std::runtime_error("failed to create server socket: " + std::string(::strerror(errno)));
+//
+//    ::fcntl(server_socket, F_SETFL, O_NONBLOCK);
+//
+//    int value = 1;
+//    ::setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
+//    ::setsockopt(server_socket, SOL_SOCKET, SO_REUSEPORT, &value, sizeof(value));
+//
+//    sockaddr_in sa;
+//
+//    sa.sin_family = AF_INET;
+//    sa.sin_port = htons(port);
+//    if (1 != ::inet_pton(AF_INET, ip, &(sa.sin_addr)))
+//      throw std::runtime_error("failed to convert " + std::string(ip) + " to sockaddr_in: " + std::string(::strerror(errno)));
+//
+//    if (0 != ::bind(server_socket, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)))
+//      throw std::runtime_error("failed to bind server socket: " + std::string(::strerror(errno)));
+//
+//    if (0 != ::listen(server_socket, backlog))
+//      throw std::runtime_error("failed to listen to server socket: " + std::string(::strerror(errno)));
+//  }
+//
+//  ~server() {
+//    for (auto client = clients_head; client != nullptr; client = client->next) {
+//      ::close(client->socket);
+//    }
+//    ::close(server_socket);
+//  }
+//
+//  // returns number of managed endpoints
+//  size_t pool(connection_allocator<BUFFER_SIZE>& allocator, bool accepting = true) {
+//    if (accepting)
+//      try_accept(allocator);
+//
+//    const auto now = std::chrono::high_resolution_clock::now();
+//    for (auto client = clients_head; client != nullptr;) {
+//      if (client->closed) {
+//        auto to_deallocate = client;
+//        client = utils::intrusive_list_item<connection<BUFFER_SIZE>>::remove(client, clients_head);
+//        allocator.deallocate(to_deallocate);
+//        --clients_num;
+//      } else {
+//        const auto recv_result = ::recv(client->socket, client->buffer.data() + client->position, client->buffer.size() - client->position, MSG_DONTWAIT);
+//
+//        if (recv_result < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+//          client->on_idle(now);
+//          client = client->next;
+//        } else if (recv_result > 0) {
+//          const auto from = client->position;
+//          client->position += recv_result;
+//          client->on_data(from, recv_result);
+//          client = client->next;
+//        } else {
+//          ::close(client->socket);
+//          auto to_deallocate = client;
+//          client = utils::intrusive_list_item<connection<BUFFER_SIZE>>::remove(client, clients_head);
+//          allocator.deallocate(to_deallocate);
+//          --clients_num;
+//        }
+//      }
+//
+//    }
+//
+//    return clients_num;
+//  }
+//
+//private:
+//  void try_accept(connection_allocator<BUFFER_SIZE>& allocator)  {
+//    const auto candidate = accept(server_socket, nullptr, nullptr);
+//    if (candidate < 0)
+//      return;
+//
+//    if (::fcntl(candidate, F_SETFL, O_NONBLOCK) == 0) {
+//      if (auto client = allocator.allocate_and_build()) {
+//        client->socket = candidate;
+//        clients_head = utils::intrusive_list_item<connection<BUFFER_SIZE>>::push_front(client, clients_head);
+//        ++clients_num;
+//        return;
+//      }
+//    }
+//
+//    ::close(candidate);
+//    return;
+//  }
+//
+//private:
+//  int server_socket = -1;
+//  // without dynamic allocation
+//
+//  connection<BUFFER_SIZE>* clients_head = nullptr;
+//  uint64_t clients_num = 0;
+//};
+
+
 template <size_t BUFFER_SIZE>
-class server {
+class worker {
 public:
 
-  explicit server(const char* ip, uint16_t port, size_t backlog)
-    : server_socket { ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) } {
-    if (server_socket == -1)
-      throw std::runtime_error("failed to create server socket: " + std::string(::strerror(errno)));
+  explicit worker(
+    utils::circular_fifo<int, 1>* server_socket_in,
+    utils::circular_fifo<int, 1>* server_socket_out,
+    std::unique_ptr<connection_allocator<BUFFER_SIZE>> allocator
+  ) : server_socket_in(server_socket_in)
+    , server_socket_out(server_socket_out)
+    , allocator(std::move(allocator)) {}
 
-    ::fcntl(server_socket, F_SETFL, O_NONBLOCK);
+  size_t pool(bool accepting = true) {
 
-    int value = 1;
-    ::setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
-    ::setsockopt(server_socket, SOL_SOCKET, SO_REUSEPORT, &value, sizeof(value));
-
-    sockaddr_in sa;
-
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    if (1 != ::inet_pton(AF_INET, ip, &(sa.sin_addr)))
-      throw std::runtime_error("failed to convert " + std::string(ip) + " to sockaddr_in: " + std::string(::strerror(errno)));
-
-    if (0 != ::bind(server_socket, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)))
-      throw std::runtime_error("failed to bind server socket: " + std::string(::strerror(errno)));
-
-    if (0 != ::listen(server_socket, backlog))
-      throw std::runtime_error("failed to listen to server socket: " + std::string(::strerror(errno)));
-  }
-
-  ~server() {
-    for (auto client = clients_head; client != nullptr; client = client->next) {
-      ::close(client->socket);
+    if (accepting) {
+      if (server_socket != -1 || server_socket_in->load(&server_socket)) {
+        const auto clients_num_before = clients_num;
+        try_accept();
+        if (clients_num_before != clients_num) {
+          server_socket_out->push(server_socket);
+          server_socket = -1;
+        }
+      }
     }
-    ::close(server_socket);
-  }
-
-  // returns number of managed endpoints
-  size_t pool(connection_allocator<BUFFER_SIZE>& allocator, bool accepting = true) {
-    if (accepting)
-      try_accept(allocator);
 
     const auto now = std::chrono::high_resolution_clock::now();
     for (auto client = clients_head; client != nullptr;) {
       if (client->closed) {
-        auto to_deallocate = client;
-        client = utils::intrusive_list_item<connection<BUFFER_SIZE>>::remove(client, clients_head);
-        allocator.deallocate(to_deallocate);
-        --clients_num;
-      } else {
+        client = remove(client);
+      } else if (client->position != client->buffer.size()) {
         const auto recv_result = ::recv(client->socket, client->buffer.data() + client->position, client->buffer.size() - client->position, MSG_DONTWAIT);
 
         if (recv_result < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
@@ -258,26 +345,34 @@ public:
           client = client->next;
         } else {
           ::close(client->socket);
-          auto to_deallocate = client;
-          client = utils::intrusive_list_item<connection<BUFFER_SIZE>>::remove(client, clients_head);
-          allocator.deallocate(to_deallocate);
-          --clients_num;
+          client = remove(client);
         }
+      } else {
+        client->on_idle(now);
+        client = client->next;
       }
-
     }
 
     return clients_num;
+
   }
 
 private:
-  void try_accept(connection_allocator<BUFFER_SIZE>& allocator)  {
+  connection<BUFFER_SIZE>* remove(connection<BUFFER_SIZE>* item) {
+    auto to_deallocate = item;
+    auto ret = utils::intrusive_list_item<connection<BUFFER_SIZE>>::remove(item, clients_head);
+    allocator->deallocate(to_deallocate);
+    --clients_num;
+    return ret;
+  }
+
+  void try_accept()  {
     const auto candidate = accept(server_socket, nullptr, nullptr);
     if (candidate < 0)
       return;
 
     if (::fcntl(candidate, F_SETFL, O_NONBLOCK) == 0) {
-      if (auto client = allocator.allocate_and_build()) {
+      if (auto client = allocator->allocate_and_build()) {
         client->socket = candidate;
         clients_head = utils::intrusive_list_item<connection<BUFFER_SIZE>>::push_front(client, clients_head);
         ++clients_num;
@@ -291,15 +386,115 @@ private:
 
 private:
   int server_socket = -1;
-  // without dynamic allocation
-
+  utils::circular_fifo<int, 1>* server_socket_in = nullptr;
+  utils::circular_fifo<int, 1>* server_socket_out = nullptr;
+  std::unique_ptr<connection_allocator<BUFFER_SIZE>> allocator;
   connection<BUFFER_SIZE>* clients_head = nullptr;
   uint64_t clients_num = 0;
 };
 
+class socket_holder {
+public:
+  explicit socket_holder()
+    : socket(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) {}
+
+  ~socket_holder() {
+    if (socket != -1) {
+      ::close(socket);
+    }
+  }
+
+  socket_holder(const socket_holder&) = delete;
+  socket_holder& operator=(const socket_holder&) = delete;
+
+
+  int handle() const {
+    return socket;
+  }
+
+private:
+  int socket = -1;
+};
+
+template <size_t BUFFER_SIZE>
+class connection_allocator_creator {
+public:
+  virtual ~connection_allocator_creator() = default;
+  virtual std::unique_ptr<connection_allocator<BUFFER_SIZE>> create() = 0;
+};
+
+
+template <size_t BUFFER_SIZE>
+class worker_pool_server {
+public:
+
+  explicit worker_pool_server(
+    size_t pool_size,
+    const char* ip,
+    uint16_t port,
+    size_t backlog,
+    std::unique_ptr<connection_allocator_creator<BUFFER_SIZE>> creator
+  ) : creator(std::move(creator)) {
+    if (server_socket.handle() == -1)
+      throw std::runtime_error("failed to create server socket: " + std::string(::strerror(errno)));
+
+    ::fcntl(server_socket.handle(), F_SETFL, O_NONBLOCK);
+
+    int value = 1;
+    ::setsockopt(server_socket.handle(), SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
+    ::setsockopt(server_socket.handle(), SOL_SOCKET, SO_REUSEPORT, &value, sizeof(value));
+
+    sockaddr_in sa;
+
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    if (1 != ::inet_pton(AF_INET, ip, &(sa.sin_addr)))
+      throw std::runtime_error("failed to convert " + std::string(ip) + " to sockaddr_in: " + std::string(::strerror(errno)));
+
+    if (0 != ::bind(server_socket.handle(), reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)))
+      throw std::runtime_error("failed to bind server socket: " + std::string(::strerror(errno)));
+
+    if (0 != ::listen(server_socket.handle(), backlog))
+      throw std::runtime_error("failed to listen to server socket: " + std::string(::strerror(errno)));
+
+    for (size_t i = 0; i < pool_size; ++i) {
+      server_socket_queues.emplace_back();
+    }
+
+    auto server_socket_iter = server_socket_queues.begin();
+    server_socket_iter->push(server_socket.handle());
+    for (size_t i = 0; i < pool_size; ++i) {
+      auto in_iter = server_socket_iter;
+      ++server_socket_iter;
+      if (server_socket_iter == server_socket_queues.end())
+        server_socket_iter = server_socket_queues.begin();
+      auto out_iter = server_socket_iter;
+      thread_group.create_thread([this, i, pool_size, in_iter, out_iter]{
+        worker<BUFFER_SIZE> tcp_worker(&*in_iter, &*out_iter, this->creator->create());
+
+        while (!finish.load(std::memory_order_acquire)) {
+          tcp_worker.pool();
+        }
+
+        while (tcp_worker.pool(false));
+      });
+    }
+  }
+
+  ~worker_pool_server() {
+    finish.store(true, std::memory_order_release);
+    thread_group.join_all();
+  }
+
+private:
+  std::list<utils::circular_fifo<int, 1>> server_socket_queues;
+  boost::thread_group thread_group;
+  socket_holder server_socket;
+  std::atomic_bool finish { false };
+  std::unique_ptr<connection_allocator_creator<BUFFER_SIZE>> creator;
+};
+
 } // namespace tcp
-
-
 
 namespace http {
 
@@ -363,9 +558,9 @@ namespace application {
 
   std::string someResponse() {
 
-    static constexpr const char* end = "\r\n";
+    static constexpr const char *end = "\r\n";
 
-    static const std::string data { R"json({"data":"some_data"})json" };
+    static const std::string data{R"json({"data":"some_data"})json"};
 
     http::ResponseBuilder builder;
     builder.set_status(200);
@@ -379,149 +574,236 @@ namespace application {
     return builder.to_string() + data + end + end;
   }
 
-  struct request {
 
-  };
+  namespace requests {
+
+    struct filter {
+
+    };
+
+    struct group {
+
+    };
+
+    struct recommended {
+
+    };
+
+    struct suggest {
+
+    };
+
+    struct update {
+
+    };
+
+    struct add {
+
+    };
+
+    struct like {
+
+    };
+  }
+
+  using request = boost::variant<
+    requests::filter,
+    requests::group,
+    requests::recommended,
+    requests::suggest,
+    requests::update,
+    requests::add,
+    requests::like
+  >;
 
   struct response {
 
   };
 
+//
+//  struct processing_info {
+//    using done_callback = void(void*);
+//
+//    const request* req;
+//    response* resp;
+//    done_callback* callback;
+//    void* data;
+//  };
+//
+//  template <size_t FIFO_SIZE>
+//  class worker {
+//  public:
+//    void pool() {
+//      processing_info info;
+//      if (queue.load(&info)) {
+//        // process it;
+//        info.callback(info.data);
+//      }
+//    }
+//
+//
+//    void process_response(const request* req, response* resp, processing_info::done_callback callback, void* data) {
+//      queue.push(processing_info{
+//        .req = req,
+//        .resp = resp,
+//        .callback = callback,
+//        .data = data
+//      });
+//    }
+//
+//  private:
+//    utils::circular_fifo<processing_info, FIFO_SIZE> queue;
+//  };
+//
+//  template <size_t BUFFER_SIZE, size_t FIFO_SIZE>
+//  class request_handler
+//    : public http::parser<BUFFER_SIZE> {
+//  public:
+//    using parent = http::parser<BUFFER_SIZE>;
+//
+//    void on_processing_done() {
+//      resp_ready.store(true, std::memory_order_release);
+//      allocator.deallocate(this);
+//    }
+//
+//    static void on_processing_done(void* data) {
+//      reinterpret_cast<request_handler<BUFFER_SIZE, FIFO_SIZE>*>(data)->on_processing_done();
+//    }
+//
+//  public:
+//    explicit request_handler(tcp::connection_allocator<BUFFER_SIZE>& allocator, worker<FIFO_SIZE>& w)
+//      : allocator(allocator)
+//      , processing_worker(w) {}
+//
+//    void on_url(const char *at, size_t length) override {}
+//    void on_body(const char *at, size_t length) override {}
+//
+//    void on_message_complete() override {
+//      pin();
+//      processing_worker.process_response(&req, &resp, &request_handler<BUFFER_SIZE, FIFO_SIZE>::on_processing_done, this);
+//    }
+//
+//    void on_idle(const std::chrono::high_resolution_clock::time_point& tp) override {
+//      if (resp_ready.load(std::memory_order_acquire)) {
+//        static const auto message = someResponse();
+//        parent::connection::send(message);
+//        parent::connection::close();
+//      } else if (!executing) {
+//        parent::on_idle(tp);
+//      }
+//    }
+//
+//    bool unpin() {
+//      return ref_cnt.fetch_sub(1) == 1;
+//    }
+//
+//  private:
+//    void pin() {
+//      ++ref_cnt;
+//    }
+//
+//  private:
+//    tcp::connection_allocator<BUFFER_SIZE>& allocator;
+//    worker<FIFO_SIZE>& processing_worker;
+//
+//    request req;
+//    response resp;
+//
+//    std::atomic_bool resp_ready { false };
+//    bool executing = false;
+//    std::atomic<uint8_t> ref_cnt { 1 };
+//  };
+//
+//  template <size_t BUFFER_SIZE, size_t WORKERS_NUM, size_t FIFO_SIZE>
+//  class simple_server
+//    : public tcp::connection_allocator<BUFFER_SIZE> {
+//  public:
+//
+//    explicit simple_server(const char* ip, uint16_t port, size_t concurrent_connections)
+//      : tcp_server(ip, port, concurrent_connections)
+//      , allocator(concurrent_connections) {
+//      for (auto& w : workers) {
+//        std::thread([&w] { while(true) w.pool(); }).detach();
+//      }
+//    }
+//
+//    void run() {
+//      tcp_server.pool(*this);
+//    }
+//
+//    void shutdown() {
+//      while (tcp_server.pool(*this, false));
+//    }
+//
+//    tcp::connection<BUFFER_SIZE>* allocate_and_build() override {
+//      auto result = allocator.allocate(*this, workers[current_worker]);
+//      ++current_worker;
+//      current_worker %= WORKERS_NUM;
+//      return result;
+//    }
+//
+//    void deallocate(tcp::connection<BUFFER_SIZE>* c) override {
+//      if (reinterpret_cast<request_handler<BUFFER_SIZE, FIFO_SIZE>*>(c)->unpin())
+//        allocator.deallocate(c);
+//    }
+//
+//  private:
+//    tcp::server<BUFFER_SIZE> tcp_server;
+//    utils::simple_allocator<request_handler<BUFFER_SIZE, FIFO_SIZE>> allocator;
+//    worker<FIFO_SIZE> workers[WORKERS_NUM];
+//    size_t current_worker = 0;
+//  };
 
-  struct processing_info {
-    using done_callback = void(void*);
-
-    const request* req;
-    response* resp;
-    done_callback* callback;
-    void* data;
-  };
-
-  template <size_t FIFO_SIZE>
-  class worker {
-  public:
-    void pool() {
-      processing_info info;
-      if (queue.load(&info)) {
-        // process it;
-        info.callback(info.data);
-      }
-    }
 
 
-    void process_response(const request* req, response* resp, processing_info::done_callback callback, void* data) {
-      queue.push(processing_info{
-        .req = req,
-        .resp = resp,
-        .callback = callback,
-        .data = data
-      });
-    }
-
-  private:
-    utils::circular_fifo<processing_info, FIFO_SIZE> queue;
-  };
-
-  template <size_t BUFFER_SIZE, size_t FIFO_SIZE>
-  class request_handler
+  template <size_t BUFFER_SIZE>
+  class tcp_pool_request_handler
     : public http::parser<BUFFER_SIZE> {
   public:
-    using parent = http::parser<BUFFER_SIZE>;
-
-    void on_processing_done() {
-      resp_ready.store(true, std::memory_order_release);
-      allocator.deallocate(this);
-    }
-
-    static void on_processing_done(void* data) {
-      reinterpret_cast<request_handler<BUFFER_SIZE, FIFO_SIZE>*>(data)->on_processing_done();
-    }
-
-  public:
-    explicit request_handler(tcp::connection_allocator<BUFFER_SIZE>& allocator, worker<FIFO_SIZE>& w)
-      : allocator(allocator)
-      , processing_worker(w) {}
-
     void on_url(const char *at, size_t length) override {}
+
     void on_body(const char *at, size_t length) override {}
 
     void on_message_complete() override {
-      pin();
-      processing_worker.process_response(&req, &resp, &request_handler<BUFFER_SIZE, FIFO_SIZE>::on_processing_done, this);
+      static const auto response = someResponse();
+      http::parser<BUFFER_SIZE>::send(response);
+      http::parser<BUFFER_SIZE>::close();
     }
-
-    void on_idle(const std::chrono::high_resolution_clock::time_point& tp) override {
-      if (resp_ready.load(std::memory_order_acquire)) {
-        static const auto message = someResponse();
-        parent::connection::send(message);
-        parent::connection::close();
-      } else if (!executing) {
-        parent::on_idle(tp);
-      }
-    }
-
-    bool unpin() {
-      return ref_cnt.fetch_sub(1) == 1;
-    }
-
-  private:
-    void pin() {
-      ++ref_cnt;
-    }
-
-  private:
-    tcp::connection_allocator<BUFFER_SIZE>& allocator;
-    worker<FIFO_SIZE>& processing_worker;
-
-    request req;
-    response resp;
-
-    std::atomic_bool resp_ready { false };
-    bool executing = false;
-    std::atomic<uint8_t> ref_cnt { 1 };
   };
 
-  template <size_t BUFFER_SIZE, size_t WORKERS_NUM, size_t FIFO_SIZE>
-  class simple_server
+  template <size_t BUFFER_SIZE>
+  class tcp_pool_request_handler_allocator
     : public tcp::connection_allocator<BUFFER_SIZE> {
   public:
+    explicit tcp_pool_request_handler_allocator(size_t connections_per_thread)
+      : allocator(connections_per_thread) {}
 
-    explicit simple_server(const char* ip, uint16_t port, size_t concurrent_connections)
-      : tcp_server(ip, port, concurrent_connections)
-      , allocator(concurrent_connections) {
-      for (auto& w : workers) {
-        std::thread([&w] { while(true) w.pool(); }).detach();
-      }
+    tcp::connection<BUFFER_SIZE> *allocate_and_build() override {
+      return allocator.allocate();
     }
 
-    void run() {
-      tcp_server.pool(*this);
-    }
-
-    void shutdown() {
-      while (tcp_server.pool(*this, false));
-    }
-
-    tcp::connection<BUFFER_SIZE>* allocate_and_build() override {
-      auto result = allocator.allocate(*this, workers[current_worker]);
-      ++current_worker;
-      current_worker %= WORKERS_NUM;
-      return result;
-    }
-
-    void deallocate(tcp::connection<BUFFER_SIZE>* c) override {
-      if (reinterpret_cast<request_handler<BUFFER_SIZE, FIFO_SIZE>*>(c)->unpin())
-        allocator.deallocate(c);
+    void deallocate(tcp::connection<BUFFER_SIZE> *c) override {
+      allocator.deallocate(c);
     }
 
   private:
-    tcp::server<BUFFER_SIZE> tcp_server;
-    utils::simple_allocator<request_handler<BUFFER_SIZE, FIFO_SIZE>> allocator;
-    worker<FIFO_SIZE> workers[WORKERS_NUM];
-    size_t current_worker = 0;
+    utils::simple_allocator<tcp_pool_request_handler<BUFFER_SIZE>> allocator;
   };
 
+  template <size_t BUFFER_SIZE>
+  class tcp_pool_request_hander_allocator_creator
+    : public tcp::connection_allocator_creator<BUFFER_SIZE> {
+  public:
+    explicit tcp_pool_request_hander_allocator_creator(size_t connections_per_thread)
+      : connections_per_thread(connections_per_thread) {}
 
+    std::unique_ptr<tcp::connection_allocator<BUFFER_SIZE>> create() override {
+      return std::unique_ptr<tcp::connection_allocator<BUFFER_SIZE>>(new tcp_pool_request_handler_allocator<BUFFER_SIZE>(connections_per_thread));
+    }
+
+  private:
+    const size_t connections_per_thread;
+  };
 
 }
 
@@ -534,8 +816,12 @@ void handle_sigint(int sig)
   done = true;
 }
 
+std::promise<void> sigint_signal;
+void set_sigint(int sig) {
+  sigint_signal.set_value();
+}
 
-void run_server() {
+void run_tcp_pool_server() {
   uint16_t port = 80;
 
   if (auto envPortValue = getenv("HIGHLOADCUP_PORT")) {
@@ -546,82 +832,116 @@ void run_server() {
     }
   }
 
-  ::signal(SIGINT, handle_sigint);
+  ::signal(SIGINT, set_sigint);
   try {
     constexpr size_t buffer_size = 8192;
     constexpr size_t backlog = 2048;
     constexpr size_t workers_num = 3;
-    constexpr size_t worker_queue_size = 1000;
+    constexpr size_t connections_per_thread = 1024;
 
-    application::simple_server<buffer_size, workers_num, worker_queue_size> server("0.0.0.0", port, backlog);
+    tcp::worker_pool_server<buffer_size> server(
+      workers_num,
+      "0.0.0.0",
+      port,
+      backlog,
+      std::unique_ptr<tcp::connection_allocator_creator<buffer_size>>(new application::tcp_pool_request_hander_allocator_creator<buffer_size>(connections_per_thread))
+    );
 
-    while (!done) {
-      server.run();
-    }
-    server.shutdown();
+    sigint_signal.get_future().wait();
   } catch (const std::exception& e) {
     std::cout << "ERROR: " << e.what() << std::endl;
   }
 }
 
-void fifo_test() {
-  utils::circular_fifo<int, 2> fifo;
 
-  int i1 = 1;
-  int i2 = 2;
-  int i3 = 3;
+//void run_server() {
+//  uint16_t port = 80;
+//
+//  if (auto envPortValue = getenv("HIGHLOADCUP_PORT")) {
+//    if (auto portCandidate = std::stoi(envPortValue)) {
+//      if (portCandidate > 0) {
+//        port = portCandidate;
+//      }
+//    }
+//  }
+//
+//  ::signal(SIGINT, handle_sigint);
+//  try {
+//    constexpr size_t buffer_size = 8192;
+//    constexpr size_t backlog = 2048;
+//    constexpr size_t workers_num = 3;
+//    constexpr size_t worker_queue_size = 1000;
+//
+//    application::simple_server<buffer_size, workers_num, worker_queue_size> server("0.0.0.0", port, backlog);
+//
+//    while (!done) {
+//      server.run();
+//    }
+//    server.shutdown();
+//  } catch (const std::exception& e) {
+//    std::cout << "ERROR: " << e.what() << std::endl;
+//  }
+//}
 
-  int load;
-
-  // first load must fail
-  assert(fifo.load(&load) == false);
-
-  // first push/load must exchange the same element
-  assert(fifo.push(i1) == true);
-  assert(fifo.load(&load) == true);
-  assert(load == i1);
-
-  // fifo must be empty after first push/load
-  assert(fifo.load(&load) == false);
-
-  // push more than capacity must fail
-  assert(fifo.push(i3) == true);
-  assert(fifo.push(i2) == true);
-  assert(fifo.push(i1) == false);
-  assert(fifo.push(i1) == false);
-
-  // load must exchange in the same order
-  assert(fifo.load(&load) == true);
-  assert(load == i3);
-
-  assert(fifo.load(&load) == true);
-  assert(load == i2);
-
-  assert(fifo.load(&load) == false);
-
-  // push between
-  assert(fifo.push(i3) == true);
-  assert(fifo.push(i2) == true);
-  assert(fifo.push(i1) == false);
-
-  assert(fifo.load(&load) == true);
-  assert(load == i3);
-
-  assert(fifo.push(i1) == true);
-
-  assert(fifo.load(&load) == true);
-  assert(load == i2);
-
-  assert(fifo.load(&load) == true);
-  assert(load == i1);
-
-  assert(fifo.load(&load) == false);
-  assert(fifo.load(&load) == false);
-}
+//void fifo_test() {
+//  utils::circular_fifo<int, 2> fifo;
+//
+//  int i1 = 1;
+//  int i2 = 2;
+//  int i3 = 3;
+//
+//  int load;
+//
+//  // first load must fail
+//  assert(fifo.load(&load) == false);
+//
+//  // first push/load must exchange the same element
+//  assert(fifo.push(i1) == true);
+//  assert(fifo.load(&load) == true);
+//  assert(load == i1);
+//
+//  // fifo must be empty after first push/load
+//  assert(fifo.load(&load) == false);
+//
+//  // push more than capacity must fail
+//  assert(fifo.push(i3) == true);
+//  assert(fifo.push(i2) == true);
+//  assert(fifo.push(i1) == false);
+//  assert(fifo.push(i1) == false);
+//
+//  // load must exchange in the same order
+//  assert(fifo.load(&load) == true);
+//  assert(load == i3);
+//
+//  assert(fifo.load(&load) == true);
+//  assert(load == i2);
+//
+//  assert(fifo.load(&load) == false);
+//
+//  // push between
+//  assert(fifo.push(i3) == true);
+//  assert(fifo.push(i2) == true);
+//  assert(fifo.push(i1) == false);
+//
+//  assert(fifo.load(&load) == true);
+//  assert(load == i3);
+//
+//  assert(fifo.push(i1) == true);
+//
+//  assert(fifo.load(&load) == true);
+//  assert(load == i2);
+//
+//  assert(fifo.load(&load) == true);
+//  assert(load == i1);
+//
+//  assert(fifo.load(&load) == false);
+//  assert(fifo.load(&load) == false);
+//}
 
 
 int main(int argc, char* argv[]) {
 //  fifo_test();
-  run_server();
+//  run_server();
+  run_tcp_pool_server();
   return 0;
 }
