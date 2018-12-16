@@ -53,12 +53,15 @@ endif()
 add_executable(highloadcup main.cpp)
 
 find_package(RapidJSON REQUIRED)
+find_package(Threads REQUIRED)
 
 target_link_libraries(highloadcup
   PRIVATE
     GSL
     httpxx
+    Threads::Threads
 )
+
 
 target_include_directories(highloadcup
   PRIVATE

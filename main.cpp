@@ -30,6 +30,7 @@
 #include <rapidjson/rapidjson.h>
 #include <rapidjson/reader.h>
 #include <atomic>
+#include <thread>
 
 namespace utils {
 
@@ -271,28 +272,21 @@ public:
 
 private:
   void try_accept(connection_allocator<BUFFER_SIZE>& allocator)  {
-    sockaddr_in sa;
-    socklen_t len = sizeof(sa);
-    auto candidate = accept(server_socket, reinterpret_cast<sockaddr*>(&sa), &len);
+    const auto candidate = accept(server_socket, nullptr, nullptr);
     if (candidate < 0)
       return;
 
-    char str[INET_ADDRSTRLEN];
-
-    const auto port = ::ntohs(sa.sin_port);
-    const auto address = ::inet_ntop(AF_INET, &(sa.sin_addr), str, INET_ADDRSTRLEN);
-    const auto fcntl_result = ::fcntl(candidate, F_SETFL, O_NONBLOCK);
-
-    if (address == nullptr || fcntl_result != 0) {
-      ::close(candidate);
-      return;
+    if (::fcntl(candidate, F_SETFL, O_NONBLOCK) == 0) {
+      if (auto client = allocator.allocate_and_build()) {
+        client->socket = candidate;
+        clients_head = utils::intrusive_list_item<connection<BUFFER_SIZE>>::push_front(client, clients_head);
+        ++clients_num;
+        return;
+      }
     }
 
-    auto client = allocator.allocate_and_build();
-    client->socket = candidate;
-
-    clients_head = utils::intrusive_list_item<connection<BUFFER_SIZE>>::push_front(client, clients_head);
-    ++clients_num;
+    ::close(candidate);
+    return;
   }
 
 private:
@@ -389,78 +383,142 @@ namespace application {
 
   };
 
-  template <size_t BUFFER_SIZE>
+  struct response {
+
+  };
+
+
+  struct processing_info {
+    using done_callback = void(void*);
+
+    const request* req;
+    response* resp;
+    done_callback* callback;
+    void* data;
+  };
+
+  template <size_t FIFO_SIZE>
+  class worker {
+  public:
+    void pool() {
+      processing_info info;
+      if (queue.load(&info)) {
+        // process it;
+        info.callback(info.data);
+      }
+    }
+
+
+    void process_response(const request* req, response* resp, processing_info::done_callback callback, void* data) {
+      queue.push(processing_info{
+        .req = req,
+        .resp = resp,
+        .callback = callback,
+        .data = data
+      });
+    }
+
+  private:
+    utils::circular_fifo<processing_info, FIFO_SIZE> queue;
+  };
+
+  template <size_t BUFFER_SIZE, size_t FIFO_SIZE>
   class request_handler
     : public http::parser<BUFFER_SIZE> {
   public:
     using parent = http::parser<BUFFER_SIZE>;
 
+    void on_processing_done() {
+      resp_ready.store(true, std::memory_order_release);
+      allocator.deallocate(this);
+    }
+
+    static void on_processing_done(void* data) {
+      reinterpret_cast<request_handler<BUFFER_SIZE, FIFO_SIZE>*>(data)->on_processing_done();
+    }
+
   public:
+    explicit request_handler(tcp::connection_allocator<BUFFER_SIZE>& allocator, worker<FIFO_SIZE>& w)
+      : allocator(allocator)
+      , processing_worker(w) {}
+
     void on_url(const char *at, size_t length) override {}
     void on_body(const char *at, size_t length) override {}
 
     void on_message_complete() override {
-      static const auto message = someResponse();
-      parent::connection::send(message);
-      parent::connection::close();
-    }
-  };
-
-  template <class CONCRETE_CONNECTION, size_t BUFFER_SIZE>
-  class simple_to_connection_allocator_adapter
-    : public tcp::connection_allocator<BUFFER_SIZE> {
-  public:
-
-    template <typename ...Args>
-    simple_to_connection_allocator_adapter(Args&& ...args)
-      : allocator(std::forward<Args>(args)...) {}
-
-    tcp::connection<BUFFER_SIZE>* allocate_and_build() override {
-      return allocator.allocate();
+      pin();
+      processing_worker.process_response(&req, &resp, &request_handler<BUFFER_SIZE, FIFO_SIZE>::on_processing_done, this);
     }
 
-    void deallocate(tcp::connection<BUFFER_SIZE>* c) override {
-      allocator.deallocate(c);
+    void on_idle(const std::chrono::high_resolution_clock::time_point& tp) override {
+      if (resp_ready.load(std::memory_order_acquire)) {
+        static const auto message = someResponse();
+        parent::connection::send(message);
+        parent::connection::close();
+      } else if (!executing) {
+        parent::on_idle(tp);
+      }
+    }
+
+    bool unpin() {
+      return ref_cnt.fetch_sub(1) == 1;
     }
 
   private:
-    utils::simple_allocator<CONCRETE_CONNECTION> allocator;
+    void pin() {
+      ++ref_cnt;
+    }
+
+  private:
+    tcp::connection_allocator<BUFFER_SIZE>& allocator;
+    worker<FIFO_SIZE>& processing_worker;
+
+    request req;
+    response resp;
+
+    std::atomic_bool resp_ready { false };
+    bool executing = false;
+    std::atomic<uint8_t> ref_cnt { 1 };
   };
 
-  template <size_t BUFFER_SIZE>
-  class simple_server {
+  template <size_t BUFFER_SIZE, size_t WORKERS_NUM, size_t FIFO_SIZE>
+  class simple_server
+    : public tcp::connection_allocator<BUFFER_SIZE> {
   public:
 
     explicit simple_server(const char* ip, uint16_t port, size_t concurrent_connections)
       : tcp_server(ip, port, concurrent_connections)
-      , allocator(concurrent_connections) {}
+      , allocator(concurrent_connections) {
+      for (auto& w : workers) {
+        std::thread([&w] { while(true) w.pool(); }).detach();
+      }
+    }
 
     void run() {
-      tcp_server.pool(allocator);
+      tcp_server.pool(*this);
     }
 
     void shutdown() {
-      while (tcp_server.pool(allocator, false));
+      while (tcp_server.pool(*this, false));
+    }
+
+    tcp::connection<BUFFER_SIZE>* allocate_and_build() override {
+      auto result = allocator.allocate(*this, workers[current_worker]);
+      ++current_worker;
+      current_worker %= WORKERS_NUM;
+      return result;
+    }
+
+    void deallocate(tcp::connection<BUFFER_SIZE>* c) override {
+      if (reinterpret_cast<request_handler<BUFFER_SIZE, FIFO_SIZE>*>(c)->unpin())
+        allocator.deallocate(c);
     }
 
   private:
     tcp::server<BUFFER_SIZE> tcp_server;
-    simple_to_connection_allocator_adapter<request_handler<BUFFER_SIZE>, BUFFER_SIZE> allocator;
-  };
-
-  class worker {
-  public:
-
-    void pool();
-
-
-  };
-
-
-
-
-  class handler_pool {
-
+    utils::simple_allocator<request_handler<BUFFER_SIZE, FIFO_SIZE>> allocator;
+    worker<FIFO_SIZE> workers[WORKERS_NUM];
+    size_t current_worker = 0;
   };
 
 
@@ -492,8 +550,10 @@ void run_server() {
   try {
     constexpr size_t buffer_size = 8192;
     constexpr size_t backlog = 2048;
+    constexpr size_t workers_num = 3;
+    constexpr size_t worker_queue_size = 1000;
 
-    application::simple_server<buffer_size> server("0.0.0.0", port, backlog);
+    application::simple_server<buffer_size, workers_num, worker_queue_size> server("0.0.0.0", port, backlog);
 
     while (!done) {
       server.run();
