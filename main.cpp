@@ -60,7 +60,7 @@ namespace utils {
     void deallocate(void* p) {
       auto object = reinterpret_cast<T*>(p);
       object->~T();
-      slots[position.fetch_sub(1, std::memory_order_acquire)] = reinterpret_cast<storage*>(p);
+      slots[position.fetch_sub(1, std::memory_order_acquire) - 1] = reinterpret_cast<storage*>(p);
     }
 
   private:
@@ -152,8 +152,7 @@ namespace tcp {
   public:
     virtual ~connection() = default;
 
-    using buffer_type = std::array<uint8_t, BUFFER_SIZE>;
-    virtual void on_data(buffer_type&& data, ssize_t size) = 0;
+    virtual void on_data(ssize_t from, ssize_t size) = 0;
     virtual void on_idle(const std::chrono::high_resolution_clock::time_point& tp) {};
 
     template <class Container>
@@ -183,6 +182,9 @@ namespace tcp {
 
     bool closed = false;
     int socket = -1;
+
+    std::array<uint8_t, BUFFER_SIZE> buffer;
+    size_t position = 0;
   };
 
   template <size_t BUFFER_SIZE>
@@ -243,14 +245,15 @@ public:
         allocator.deallocate(to_deallocate);
         --clients_num;
       } else {
-        typename connection<BUFFER_SIZE>::buffer_type buffer;
-        const auto recv_result = ::recv(client->socket, buffer.data(), buffer.size(), MSG_DONTWAIT);
+        const auto recv_result = ::recv(client->socket, client->buffer.data() + client->position, client->buffer.size() - client->position, MSG_DONTWAIT);
 
         if (recv_result < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
           client->on_idle(now);
           client = client->next;
         } else if (recv_result > 0) {
-          client->on_data(std::move(buffer), recv_result);
+          const auto from = client->position;
+          client->position += recv_result;
+          client->on_data(from, recv_result);
           client = client->next;
         } else {
           ::close(client->socket);
@@ -342,8 +345,8 @@ namespace http {
       lastAccess = std::chrono::high_resolution_clock::now();
     }
 
-    void on_data(typename tcp::connection<BUFFER_SIZE>::buffer_type&& data, ssize_t size) override {
-      http_parser_execute(&p, &settings, reinterpret_cast<const char*>(data.data()), size);
+    void on_data(ssize_t from, ssize_t size) override {
+      http_parser_execute(&p, &settings, reinterpret_cast<const char*>(connection::buffer.data() + from), size);
       lastAccess = std::chrono::high_resolution_clock::now();
     }
 
@@ -359,35 +362,6 @@ namespace http {
 
     std::chrono::high_resolution_clock::time_point lastAccess;
   };
-//
-//  template <size_t BUFFER_SIZE>
-//  class server
-//    : public tcp::connection_allocator<BUFFER_SIZE> {
-//  public:
-//
-//    explicit server(const char* ip, uint16_t port, size_t concurrent_connections)
-//      : s(ip, port, concurrent_connections), allocator(concurrent_connections) {}
-//
-//    tcp::connection<BUFFER_SIZE>* allocate_and_build() override {
-//      return allocator.allocate();
-//    }
-//
-//    void deallocate(tcp::connection<BUFFER_SIZE>* connection) override {
-//      allocator.deallocate(connection);
-//    }
-//
-//    void run() {
-//      s.pool(*this);
-//    }
-//
-//    void shutdown() {
-//      while (s.pool(*this, false));
-//    }
-//
-//  private:
-//    tcp::server<BUFFER_SIZE> s;
-//    utils::simple_allocator<parser<BUFFER_SIZE>> allocator;
-//  };
 
 }
 
@@ -432,20 +406,14 @@ namespace application {
     }
   };
 
-  class worker {
-  public:
-
-    void pool();
-
-
-  };
-
-
-
   template <class CONCRETE_CONNECTION, size_t BUFFER_SIZE>
   class simple_to_connection_allocator_adapter
     : public tcp::connection_allocator<BUFFER_SIZE> {
   public:
+
+    template <typename ...Args>
+    simple_to_connection_allocator_adapter(Args&& ...args)
+      : allocator(std::forward<Args>(args)...) {}
 
     tcp::connection<BUFFER_SIZE>* allocate_and_build() override {
       return allocator.allocate();
@@ -458,6 +426,38 @@ namespace application {
   private:
     utils::simple_allocator<CONCRETE_CONNECTION> allocator;
   };
+
+  template <size_t BUFFER_SIZE>
+  class simple_server {
+  public:
+
+    explicit simple_server(const char* ip, uint16_t port, size_t concurrent_connections)
+      : tcp_server(ip, port, concurrent_connections)
+      , allocator(concurrent_connections) {}
+
+    void run() {
+      tcp_server.pool(allocator);
+    }
+
+    void shutdown() {
+      while (tcp_server.pool(allocator, false));
+    }
+
+  private:
+    tcp::server<BUFFER_SIZE> tcp_server;
+    simple_to_connection_allocator_adapter<request_handler<BUFFER_SIZE>, BUFFER_SIZE> allocator;
+  };
+
+  class worker {
+  public:
+
+    void pool();
+
+
+  };
+
+
+
 
   class handler_pool {
 
@@ -490,10 +490,10 @@ void run_server() {
 
   ::signal(SIGINT, handle_sigint);
   try {
-    constexpr size_t buffer_size = 256;
+    constexpr size_t buffer_size = 8192;
     constexpr size_t backlog = 2048;
 
-    http::server<buffer_size> server("0.0.0.0", port, backlog);
+    application::simple_server<buffer_size> server("0.0.0.0", port, backlog);
 
     while (!done) {
       server.run();
