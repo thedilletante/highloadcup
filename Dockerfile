@@ -17,16 +17,16 @@ RUN       yum install -y wget && \
 
 RUN yum install -y boost-devel
 RUN yum install -y centos-release-scl && \
-    yum install -y devtoolset-7-gcc* && \
-    scl enable devtoolset-7 bash
+    yum install -y devtoolset-6-gcc* && \
+    scl enable devtoolset-6 bash
 
 ADD     CMakeLists.txt .
 ADD     main.cpp .
 
 WORKDIR /root/highloadcup/build
 
-RUN     cmake3 .. -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ && make -j4
+RUN     cmake3 .. -DCMAKE_C_COMPILER=/opt/rh/devtoolset-6/root/usr/bin/gcc -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-6/root/usr/bin/g++ && make -j4
 
 EXPOSE 80
 
-CMD     ./highloadcup
+CMD     HIGHLOADCUP_PORT=80 ./highloadcup
