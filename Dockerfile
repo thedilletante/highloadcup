@@ -27,6 +27,6 @@ WORKDIR /root/highloadcup/build
 
 RUN     cmake3 .. -DCMAKE_C_COMPILER=/opt/rh/devtoolset-6/root/usr/bin/gcc -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-6/root/usr/bin/g++ && make -j4
 
-EXPOSE 80
-
-CMD     HIGHLOADCUP_PORT=80 ./highloadcup
+ENV     HIGHLOADCUP_PORT 80
+EXPOSE  ${HIGHLOADCUP_PORT}
+CMD     ./highloadcup

@@ -594,7 +594,7 @@ namespace application {
 }
 
 void run_tcp_pool_server() {
-  uint16_t port = 80;
+  uint16_t port = 8080;
 
   if (auto envPortValue = getenv("HIGHLOADCUP_PORT")) {
     if (auto portCandidate = std::stoi(envPortValue)) {
