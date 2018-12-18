@@ -30,14 +30,20 @@
 
 #include <rapidjson/rapidjson.h>
 #include <rapidjson/reader.h>
+#include <rapidjson/stringbuffer.h>
 #include <atomic>
 #include <thread>
 
 #include <boost/variant.hpp>
+#include <boost/optional.hpp>
 #include <boost/thread.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+
+#include <gsl/string_span>
 
 namespace utils {
 
@@ -164,10 +170,10 @@ namespace tcp {
     virtual ~connection() = default;
 
     virtual void on_data(ssize_t from, ssize_t size) = 0;
-    virtual void on_idle(const std::chrono::high_resolution_clock::time_point& tp) {};
 
     template <class Container>
     size_t send(const Container& data) {
+      inactive_ticks = 0;
       size_t rest = data.size();
 
       while (rest > 0) {
@@ -194,6 +200,8 @@ namespace tcp {
 
     std::array<uint8_t, BUFFER_SIZE> buffer;
     size_t position = 0;
+
+    uint32_t inactive_ticks = 0;
   };
 
   template <size_t BUFFER_SIZE>
@@ -229,32 +237,32 @@ public:
       }
     }
 
-    const auto now = std::chrono::high_resolution_clock::now();
     for (auto client = clients_head; client != nullptr;) {
-      if (client->closed) {
+      if (client->closed || client->position == client->buffer.size()) {
         boost::system::error_code err;
         client->socket->shutdown(boost::asio::ip::tcp::socket::shutdown_both, err);
         client->socket->close(err);
         client = remove(client);
-      } else if (client->position != client->buffer.size()) {
+      } else {
         const auto recv_result = ::recv(client->socket->native_handle(), client->buffer.data() + client->position, client->buffer.size() - client->position, MSG_DONTWAIT);
-
-        if (recv_result < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
-          client->on_idle(now);
-          client = client->next;
-        } else if (recv_result > 0) {
+        if (recv_result > 0) {
           const auto from = client->position;
+          client->inactive_ticks = 0;
           client->position += recv_result;
           client->on_data(from, recv_result);
           client = client->next;
         } else {
-          boost::system::error_code err;
-          client->socket->close(err);
-          client = remove(client);
+          // approximately 7 seconds with 1 client connected
+          static const auto max_ticks = std::numeric_limits<decltype(client->inactive_ticks)>::max() / (1024);
+          if ((errno != EWOULDBLOCK && errno != EAGAIN) || (client->inactive_ticks > max_ticks - clients_num)) {
+            boost::system::error_code err;
+            client->socket->close(err);
+            client = remove(client);
+          } else {
+            client->inactive_ticks += clients_num;
+            client = client->next;
+          }
         }
-      } else {
-        client->on_idle(now);
-        client = client->next;
       }
     }
 
@@ -353,7 +361,7 @@ public:
 private:
   void post_accept() {
     auto client = socket_allocator.allocate(service);
-    acceptor.async_accept(*client, [this, client](const boost::system::error_code& error) mutable {
+    acceptor.async_accept(*client, [this, client](const boost::system::error_code& error) {
       if (stopped || error)
         return;
 
@@ -461,12 +469,6 @@ namespace http {
       lastAccess = std::chrono::high_resolution_clock::now();
     }
 
-    void on_idle(const std::chrono::high_resolution_clock::time_point& tp) override {
-      if (tp - lastAccess > std::chrono::seconds(5)) {
-        connection::close();
-      }
-    }
-
   private:
     http_parser p;
     http_parser_settings settings;
@@ -478,27 +480,7 @@ namespace http {
 
 namespace application {
 
-  std::string someResponse() {
-
-    static constexpr const char *end = "\r\n";
-
-    static const std::string data{R"json({"data":"some_data"})json"};
-
-    http::ResponseBuilder builder;
-    builder.set_status(200);
-    builder.set_major_version(1);
-    builder.set_minor_version(1);
-
-    builder.headers()["Connection-Type"] = "application/json";
-    builder.headers()["Connection-Length"] = std::to_string(data.size());
-    builder.headers()["Connection"] = "close";
-
-    return builder.to_string() + data + end + end;
-  }
-
-
   namespace requests {
-
     struct filter {
 
     };
@@ -546,15 +528,49 @@ namespace application {
   class tcp_pool_request_handler
     : public http::parser<BUFFER_SIZE> {
   public:
-    void on_url(const char *at, size_t length) override {}
+    void on_url(const char *at, size_t length) override {
+      if (length >= 9 && 0 == ::strncmp(at, "/accounts", std::min<size_t>(length, 9))) {
+        req = requests::filter();
+      }
+    }
 
     void on_body(const char *at, size_t length) override {}
 
     void on_message_complete() override {
-      static const auto response = someResponse();
-      http::parser<BUFFER_SIZE>::send(response);
+
+      static const std::string end = "\r\n";
+
+      http::ResponseBuilder builder;
+      rapidjson::Document json;
+      json.SetObject();
+
+      rapidjson::StringBuffer strbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> writer(strbuf);
+
+      builder.set_major_version(1);
+      builder.set_minor_version(1);
+
+      if (req) {
+        json.AddMember("data", "some_data", json.GetAllocator());
+        builder.set_status(200);
+      } else {
+        builder.set_status(404);
+      }
+
+      json.Accept(writer);
+
+      builder.headers()["Connection-Type"] = "application/json";
+      builder.headers()["Connection-Length"] = std::to_string(strbuf.GetSize());
+      builder.headers()["Connection"] = "close";
+
+      http::parser<BUFFER_SIZE>::send(builder.to_string());
+      http::parser<BUFFER_SIZE>::send(gsl::make_span(strbuf.GetString(), strbuf.GetSize()));
+      http::parser<BUFFER_SIZE>::send(end);
       http::parser<BUFFER_SIZE>::close();
     }
+
+  private:
+    boost::optional<request> req;
   };
 
   template <size_t BUFFER_SIZE>
