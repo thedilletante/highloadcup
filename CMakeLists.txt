@@ -13,6 +13,9 @@ set(HTTPXX_VERSION master)
 set(RAPIDJSON_REPOSITORY https://github.com/Tencent/rapidjson.git)
 set(RAPIDJSON_VERSION v1.1.0)
 
+set(YUAREL_REPOSITORY https://github.com/jacketizer/libyuarel.git)
+set(YUAREL_VERSION 1.0)
+
 FetchContent_Declare(
   gsl
   GIT_REPOSITORY ${GSL_REPOSITORY}
@@ -50,6 +53,27 @@ if(NOT rapid_json_POPULATED)
   add_subdirectory(${rapid_json_SOURCE_DIR} ${rapid_json_BINARY_DIR})
 endif()
 
+FetchContent_Declare(
+  yuarel
+  GIT_REPOSITORY ${YUAREL_REPOSITORY}
+  GIT_TAG        ${YUAREL_VERSION}
+)
+
+FetchContent_GetProperties(yuarel)
+if(NOT yuarel_POPULATED)
+  FetchContent_Populate(yuarel)
+
+  add_library(yuarel
+    ${yuarel_SOURCE_DIR}/yuarel.c
+    ${yuarel_SOURCE_DIR}/yuarel.h
+  )
+
+  target_include_directories(yuarel
+    PUBLIC
+      ${yuarel_SOURCE_DIR}
+  )
+endif()
+
 add_executable(highloadcup main.cpp)
 
 find_package(Threads REQUIRED)
@@ -62,6 +86,7 @@ target_link_libraries(highloadcup
     Threads::Threads
     Boost::system
     Boost::thread
+    yuarel
 )
 
 

@@ -40,10 +40,19 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/signal_set.hpp>
+
+#define BOOST_RESULT_OF_USE_TR1 1
+#include <boost/spirit/include/qi.hpp>
+#include <boost/fusion/include/std_pair.hpp>
+
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 
 #include <gsl/string_span>
+
+extern "C" {
+#include <yuarel.h>
+};
 
 namespace utils {
 
@@ -434,9 +443,68 @@ namespace http {
   public:
     using connection = tcp::connection<BUFFER_SIZE>;
 
-    virtual void on_url(const char* at, size_t length) = 0;
-    virtual void on_body(const char* at, size_t length) = 0;
-    virtual void on_message_complete() = 0;
+    void on_url(const char* at, size_t length) {
+      if (url_position == nullptr) {
+        url_position = const_cast<char*>(at);
+      }
+      url_length += length;
+    }
+
+    void on_body(const char* at, size_t length) {
+      if (body_position == nullptr) {
+        body_position = const_cast<char*>(at);
+      }
+      body_length += length;
+    }
+
+    void on_message_complete() {
+      method = static_cast<http_method>(p.method);
+      path = url_position;
+      path_length = url_length;
+      url_position[url_length] = '\0';
+
+      if (path != nullptr && path_length != 0) {
+        if (auto question_pos = reinterpret_cast<char*>(memchr(path, '?', path_length))) {
+          path_length = (question_pos - path);
+
+          if (path_length + 1 < url_length) {
+            params_length = yuarel_parse_query(question_pos + 1, '&', query_params.data(), query_params.size());
+          }
+        }
+      }
+
+      on_request_ready();
+    }
+
+    void on_header_field(const char* at, size_t length) {
+      if (headers_length >= headers.size())
+        return;
+
+      if (headers_started) {
+        ++headers_length;
+      } else {
+        headers_started = true;
+      }
+
+      auto& current_header = headers[headers_length];
+      if (current_header.key == nullptr) {
+        current_header.key = const_cast<char*>(at);
+      }
+      current_header.key_length += length;
+    }
+
+    void on_header_value(const char* at, size_t length) {
+      if (headers_length >= headers.size())
+        return;
+
+      auto& current_header = headers[headers_length];
+      if (current_header.value == nullptr) {
+        current_header.value = const_cast<char*>(at);
+      }
+      current_header.value_length += length;
+    }
+
+    virtual void on_request_ready() = 0;
 
   private:
     static int on_url(http_parser* p, const char* at, size_t length) {
@@ -453,27 +521,66 @@ namespace http {
       return 0;
     }
 
+    static int on_header_field(http_parser* p, const char* at, size_t length) {
+      reinterpret_cast<parser*>(p->data)->on_header_field(at, length);
+      return 0;
+    }
+
+    static int on_header_value(http_parser* p, const char* at, size_t length) {
+      reinterpret_cast<parser*>(p->data)->on_header_value(at, length);
+      return 0;
+    }
+
   public:
     parser() {
       p.data = this;
       http_parser_init(&p, HTTP_REQUEST);
       std::memset(&settings, 0, sizeof(settings));
       settings.on_url = &parser::on_url;
+      settings.on_header_field = &parser::on_header_field;
+      settings.on_header_value = &parser::on_header_value;
       settings.on_body = &parser::on_body;
       settings.on_message_complete = &parser::on_message_complete;
-      lastAccess = std::chrono::high_resolution_clock::now();
     }
 
     void on_data(ssize_t from, ssize_t size) override {
-      http_parser_execute(&p, &settings, reinterpret_cast<const char*>(connection::buffer.data() + from), size);
-      lastAccess = std::chrono::high_resolution_clock::now();
+      const auto handled = http_parser_execute(&p, &settings, reinterpret_cast<const char*>(connection::buffer.data() + from), size);
+      if (handled != size) {
+        connection::close();
+      }
     }
 
   private:
     http_parser p;
     http_parser_settings settings;
 
-    std::chrono::high_resolution_clock::time_point lastAccess;
+    bool headers_started = false;
+
+  protected:
+    http_method method;
+
+    char* url_position = nullptr;
+    size_t url_length = 0;
+
+    char* path = nullptr;
+    size_t path_length = 0;
+
+    std::array<yuarel_param, 30> query_params;
+    size_t params_length = 0;
+
+    struct header {
+      char* key = nullptr;
+      size_t key_length = 0;
+
+      char* value = nullptr;
+      size_t value_length = 0;
+    };
+
+    std::array<header, 30> headers;
+    size_t headers_length = 0;
+
+    char* body_position = nullptr;
+    size_t body_length = 0;
   };
 
 }
@@ -528,16 +635,10 @@ namespace application {
   class tcp_pool_request_handler
     : public http::parser<BUFFER_SIZE> {
   public:
-    void on_url(const char *at, size_t length) override {
-      if (length >= 9 && 0 == ::strncmp(at, "/accounts", std::min<size_t>(length, 9))) {
-        req = requests::filter();
-      }
-    }
 
-    void on_body(const char *at, size_t length) override {}
+    using parsed = http::parser<BUFFER_SIZE>;
 
-    void on_message_complete() override {
-
+    void on_request_ready() override {
       static const std::string end = "\r\n";
 
       http::ResponseBuilder builder;
@@ -550,11 +651,43 @@ namespace application {
       builder.set_major_version(1);
       builder.set_minor_version(1);
 
-      if (req) {
-        json.AddMember("data", "some_data", json.GetAllocator());
-        builder.set_status(200);
-      } else {
-        builder.set_status(404);
+      builder.set_status(200);
+
+      json.AddMember("method", rapidjson::Value(parsed::method), json.GetAllocator());
+
+      if (parsed::path != nullptr) {
+        json.AddMember("path", rapidjson::Value(parsed::path, parsed::path_length), json.GetAllocator());
+      }
+
+      if (parsed::headers_length > 0) {
+        rapidjson::Value headers(rapidjson::kArrayType);
+        for (size_t i = 0; i < parsed::headers_length; ++i) {
+          rapidjson::Value header(rapidjson::kObjectType);
+          header.AddMember(
+            rapidjson::Value(parsed::headers[i].key, parsed::headers[i].key_length),
+            rapidjson::Value(parsed::headers[i].value, parsed::headers[i].value_length),
+            json.GetAllocator());
+          headers.PushBack(header.Move(), json.GetAllocator());
+        }
+        json.AddMember("headers", headers.Move(), json.GetAllocator());
+      }
+
+      if (parsed::params_length > 0) {
+        rapidjson::Value params(rapidjson::kArrayType);
+        for (size_t i = 0; i < parsed::params_length; ++i) {
+          rapidjson::Value param(rapidjson::kObjectType);
+          param.AddMember(
+            rapidjson::Value(parsed::query_params[i].key, json.GetAllocator()).Move(),
+            parsed::query_params[i].val ? rapidjson::Value(parsed::query_params[i].val, json.GetAllocator()).Move() : rapidjson::Value().Move(),
+            json.GetAllocator()
+          );
+          params.PushBack(param.Move(), json.GetAllocator());
+        }
+        json.AddMember("params", params.Move(), json.GetAllocator());
+      }
+
+      if (parsed::body_position != nullptr) {
+        json.AddMember("body", rapidjson::Value(parsed::body_position, parsed::body_length), json.GetAllocator());
       }
 
       json.Accept(writer);
@@ -567,10 +700,8 @@ namespace application {
       http::parser<BUFFER_SIZE>::send(gsl::make_span(strbuf.GetString(), strbuf.GetSize()));
       http::parser<BUFFER_SIZE>::send(end);
       http::parser<BUFFER_SIZE>::close();
-    }
 
-  private:
-    boost::optional<request> req;
+    }
   };
 
   template <size_t BUFFER_SIZE>
