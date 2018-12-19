@@ -862,80 +862,13 @@ void db_test() {
   }
 }
 
-class account_parser
-  : public rapidjson::BaseReaderHandler<rapidjson::UTF8<>, account_parser> {
-public:
-  bool Default() override {
-    return BaseReaderHandler::Default();
-  }
-
-  bool Null() override {
-    return BaseReaderHandler::Null();
-  }
-
-  bool Bool(bool b1) override {
-    return BaseReaderHandler::Bool(b1);
-  }
-
-  bool Int(int i1) override {
-    return BaseReaderHandler::Int(i1);
-  }
-
-  bool Uint(unsigned int i1) override {
-    return BaseReaderHandler::Uint(i1);
-  }
-
-  bool Int64(int64_t int64) override {
-    return BaseReaderHandler::Int64(int64);
-  }
-
-  bool Uint64(uint64_t uint64) override {
-    return BaseReaderHandler::Uint64(uint64);
-  }
-
-  bool Double(double d) override {
-    return BaseReaderHandler::Double(d);
-  }
-
-  bool RawNumber(const Ch *str, rapidjson::SizeType len, bool copy) override {
-    return BaseReaderHandler::RawNumber(str, len, copy);
-  }
-
-  bool String(const Ch *ch, rapidjson::SizeType type, bool b1) override {
-    return BaseReaderHandler::String(ch, type, b1);
-  }
-
-  bool StartObject() override {
-    return BaseReaderHandler::StartObject();
-  }
-
-  bool Key(const Ch *str, rapidjson::SizeType len, bool copy) override {
-    return BaseReaderHandler::Key(str, len, copy);
-  }
-
-  bool EndObject(rapidjson::SizeType type) override {
-    return BaseReaderHandler::EndObject(type);
-  }
-
-  bool StartArray() override {
-    return BaseReaderHandler::StartArray();
-  }
-
-  bool EndArray(rapidjson::SizeType type) override {
-    return BaseReaderHandler::EndArray(type);
-  }
-
-
-};
-
-
 int main(int argc, char* argv[]) {
 
   db_test();
-//  for (auto i = 1; i < argc; ++i) {
-//    fprintf(stdout, "file provided: %s\n", argv[i]);
-//  }
-////  fifo_test();
-//  run_tcp_pool_server();
+ for (auto i = 1; i < argc; ++i) {
+   fprintf(stdout, "file provided: %s\n", argv[i]);
+ }
+//  fifo_test();
+ run_tcp_pool_server();
   return 0;
 }
