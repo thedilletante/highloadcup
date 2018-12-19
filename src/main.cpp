@@ -54,6 +54,8 @@ extern "C" {
 #include <yuarel.h>
 };
 
+#include <SQLiteCpp/Database.h>
+
 namespace utils {
 
   template <class T>
@@ -834,9 +836,106 @@ void fifo_test() {
   assert(fifo.load(&load) == false);
 }
 
+#include <sqlite3.h>
+
+void db_test() {
+  SQLite::Database db("example.db3", SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
+
+  db.exec("DROP TABLE IF EXISTS test");
+  db.exec("CREATE TABLE test (value TEXT)");
+
+  const std::list<std::string> texts = {
+    "hello",
+    "ahfdskjz",
+    "aksjbdflkabsf"
+  };
+
+  for (auto& text : texts) {
+    SQLite::Statement q(db, "INSERT INTO test VALUES(:text)");
+    q.bind(":text", text);
+    q.exec();
+  }
+
+  SQLite::Statement s(db, "SELECT value FROM test");
+  while (s.executeStep()) {
+    std::cout << "text is: " << s.getColumn(0).getString() << std::endl;
+  }
+}
+
+class account_parser
+  : public rapidjson::BaseReaderHandler<rapidjson::UTF8<>, account_parser> {
+public:
+  bool Default() override {
+    return BaseReaderHandler::Default();
+  }
+
+  bool Null() override {
+    return BaseReaderHandler::Null();
+  }
+
+  bool Bool(bool b1) override {
+    return BaseReaderHandler::Bool(b1);
+  }
+
+  bool Int(int i1) override {
+    return BaseReaderHandler::Int(i1);
+  }
+
+  bool Uint(unsigned int i1) override {
+    return BaseReaderHandler::Uint(i1);
+  }
+
+  bool Int64(int64_t int64) override {
+    return BaseReaderHandler::Int64(int64);
+  }
+
+  bool Uint64(uint64_t uint64) override {
+    return BaseReaderHandler::Uint64(uint64);
+  }
+
+  bool Double(double d) override {
+    return BaseReaderHandler::Double(d);
+  }
+
+  bool RawNumber(const Ch *str, rapidjson::SizeType len, bool copy) override {
+    return BaseReaderHandler::RawNumber(str, len, copy);
+  }
+
+  bool String(const Ch *ch, rapidjson::SizeType type, bool b1) override {
+    return BaseReaderHandler::String(ch, type, b1);
+  }
+
+  bool StartObject() override {
+    return BaseReaderHandler::StartObject();
+  }
+
+  bool Key(const Ch *str, rapidjson::SizeType len, bool copy) override {
+    return BaseReaderHandler::Key(str, len, copy);
+  }
+
+  bool EndObject(rapidjson::SizeType type) override {
+    return BaseReaderHandler::EndObject(type);
+  }
+
+  bool StartArray() override {
+    return BaseReaderHandler::StartArray();
+  }
+
+  bool EndArray(rapidjson::SizeType type) override {
+    return BaseReaderHandler::EndArray(type);
+  }
+
+
+};
+
 
 int main(int argc, char* argv[]) {
-//  fifo_test();
-  run_tcp_pool_server();
+
+  db_test();
+//  for (auto i = 1; i < argc; ++i) {
+//    fprintf(stdout, "file provided: %s\n", argv[i]);
+//  }
+////  fifo_test();
+//  run_tcp_pool_server();
   return 0;
 }
