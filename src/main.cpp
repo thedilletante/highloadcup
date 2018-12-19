@@ -872,6 +872,7 @@ int main(int argc, char* argv[]) {
 //  fifo_test();
  HLC::TDatabase db;
  db.LoadFromFile("/home/sildtm/Projects/personal/highloadcup/dataset/data/accounts_1.json");
- run_tcp_pool_server();
+ db.Dump();
+// run_tcp_pool_server();
   return 0;
 }
