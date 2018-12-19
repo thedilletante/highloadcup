@@ -16,6 +16,9 @@ set(RAPIDJSON_VERSION v1.1.0)
 set(YUAREL_REPOSITORY https://github.com/jacketizer/libyuarel.git)
 set(YUAREL_VERSION 1.0)
 
+set(SQLITECPP_REPOSITORY https://github.com/SRombauts/SQLiteCpp.git)
+set(SQLITECPP_VERSION 2.2.0)
+
 FetchContent_Declare(
   gsl
   GIT_REPOSITORY ${GSL_REPOSITORY}
@@ -74,6 +77,18 @@ if(NOT yuarel_POPULATED)
   )
 endif()
 
+FetchContent_Declare(
+  sqlite_cpp
+  GIT_REPOSITORY ${SQLITECPP_REPOSITORY}
+  GIT_TAG        ${SQLITECPP_VERSION}
+)
+
+FetchContent_GetProperties(sqlite_cpp)
+if(NOT sqlite_cpp_POPULATED)
+  FetchContent_Populate(sqlite_cpp)
+  add_subdirectory(${sqlite_cpp_SOURCE_DIR} ${sqlite_cpp_BINARY_DIR})
+endif()
+
 add_executable(highloadcup main.cpp)
 
 find_package(Threads REQUIRED)
@@ -87,6 +102,9 @@ target_link_libraries(highloadcup
     Boost::system
     Boost::thread
     yuarel
+    SQLiteCpp
+    sqlite3
+    ${CMAKE_DL_LIBS}
 )
 
 
