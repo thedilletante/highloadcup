@@ -89,7 +89,9 @@ if(NOT sqlite_cpp_POPULATED)
   add_subdirectory(${sqlite_cpp_SOURCE_DIR} ${sqlite_cpp_BINARY_DIR})
 endif()
 
-add_executable(highloadcup main.cpp)
+add_executable(highloadcup
+        src/db.cpp
+        src/main.cpp)
 
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system thread)
@@ -112,4 +114,5 @@ target_include_directories(highloadcup
   PRIVATE
     ${httpxx_SOURCE_DIR}
     ${rapid_json_SOURCE_DIR}/include
+    src
 )

@@ -49,6 +49,7 @@
 #include <rapidjson/writer.h>
 
 #include <gsl/string_span>
+#include "db.h"
 
 extern "C" {
 #include <yuarel.h>
@@ -869,6 +870,8 @@ int main(int argc, char* argv[]) {
    fprintf(stdout, "file provided: %s\n", argv[i]);
  }
 //  fifo_test();
+ HLC::TDatabase db;
+ db.LoadFromFile("/home/sildtm/Projects/personal/highloadcup/dataset/data/accounts_1.json");
  run_tcp_pool_server();
   return 0;
 }
