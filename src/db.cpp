@@ -16,41 +16,42 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
     Document document;
     document.ParseStream<0, UTF8<>, FileReadStream>(is);
     const auto& accounts = document["accounts"].GetArray();
-    Accounts.reserve(accounts.Size());
+    {
+        unique_lock<mutex> addLock(InsertDataMtx);
+        Accounts.reserve(Accounts.size() + accounts.Size());
+    }
     ReadThreadCount = 0;
-    const auto threadPoolSize = thread::hardware_concurrency();
-    cout << accounts.Size() << endl;
+    const auto maxThreadCount = thread::hardware_concurrency();
 
     const auto accountsSize = accounts.Size();
-    for(uint64_t i = 0; i < accountsSize;) {
-        auto start = i;
+    for(uint64_t i = 0; i <= accountsSize;) {
+        size_t start = i;
         i+=FileReadBlockSize;
-        auto end = i >= accountsSize ? accountsSize : i;
-        cout << "start: " << start << ", end: " << end << endl;
+        size_t end = i >= accountsSize ? accountsSize : i;
 
-        if(ReadThreadCount <= threadPoolSize) {
-            ReadThreadCount++;
-//            thread(&TDatabase::ParseJsonWorker, this, accounts[i], start, end).detach();
-            ParseJsonWorker(accounts, start, end);
-//        } else {
-//            unique_lock<mutex> lock(ThreadMtx);
-//            ThreadWaitCond.wait(lock, [&]() { return ReadThreadCount <= threadPoolSize;});
+        if(ReadThreadCount > maxThreadCount) {
+//            std::cout << "i'm wait" << endl;
+            unique_lock<mutex> lock(ThreadMtx);
+            ThreadWaitCond.wait(lock, [&]() { return ReadThreadCount <= maxThreadCount;});
         }
+        ReadThreadCount++;
+        thread(&TDatabase::ParseJsonWorker, this, accounts, start, end).detach();
+//        cout << "start: " << start << ", end: " << end << endl;
+
+
     }
-//    unique_lock<mutex> lock(ThreadMtx);
-//    ThreadWaitCond.wait(lock, [&]() {return ReadThreadCount == 0;});
+    unique_lock<mutex> lock(ThreadMtx);
+    ThreadWaitCond.wait(lock, [&]() {return ReadThreadCount == 0;});
     return true;
 }
 
 void TDatabase::ParseJsonWorker(const TAccountsJsonArray& accounts, size_t start, size_t end) {
-
     for(size_t i = start; i < end; ++i) {
-        cout << "internal start: " << start << ", end: " << end << ", pos: " << i << endl;
-        cout << "size: " << accounts.Size() << endl;
+//        cout << "start with " << i << endl;
         ParseJsonAccount(accounts[i]);
     }
     ReadThreadCount--;
-//    ThreadWaitCond.notify_one();
+    ThreadWaitCond.notify_one();
 }
 
 
@@ -59,8 +60,6 @@ void TDatabase::ParseJsonAccount(const TAccountJson& jsonAcc) {
     if(EmailKeys.find(email) != EmailKeys.end()) {
         return;
     }
-    cout << email << endl;
-
     TPhoneType phone = "";
     if(jsonAcc.HasMember("phone")) {
         phone = jsonAcc["phone"].GetString();

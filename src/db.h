@@ -72,7 +72,7 @@ private:
     TAccountsType Accounts;
     TEmailKeysType EmailKeys;
     TPhoneKeysType PhoneKeys;
-    size_t FileReadBlockSize = 20;
+    size_t FileReadBlockSize = 10;
     mutex InsertDataMtx;
     mutex ThreadMtx;
     condition_variable ThreadWaitCond;
