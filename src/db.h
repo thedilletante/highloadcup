@@ -5,8 +5,9 @@
 #include <unordered_map>
 #include <rapidjson/document.h>
 #include <thread>
-
-
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 namespace HLC {
 using namespace std;
 
@@ -57,13 +58,18 @@ class TDatabase {
 public:
     bool LoadFromFile(const std::string& filePath);
     void Dump();
+    void ParseJsonWorker(const rapidjson::Value& accounts, size_t start, size_t end);
     void ParseJsonAccount(const rapidjson::Value& jsonAcc);
     ~TDatabase();
 private:
     TAccountsType Accounts;
     TEmailKeysType EmailKeys;
     TPhoneKeysType PhoneKeys;
-    vector<thread> FileReadThreadPool;
+    size_t FileReadBlockSize = 20;
+    mutex InsertDataMtx;
+    mutex ThreadMtx;
+    condition_variable ThreadWaitCond;
+    atomic_uint8_t ReadThreadCount;
 
 
 };
