@@ -3,6 +3,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <rapidjson/document.h>
 #include <thread>
 #include <mutex>
@@ -13,11 +14,6 @@ using namespace std;
 
 using TIdType = uint32_t;
 using TTimestampType = uint32_t;
-struct TLike {
-    TTimestampType Ts;
-    TIdType Id;
-};
-
 using TFnameType = string;
 using TSnameType = string;
 using TEmailType = string;
@@ -26,7 +22,7 @@ using TStatusType = string;
 using TPremiumTimeType = TTimestampType;
 using TSexType = bool;
 using TPhoneType = string;
-using TLikesType = vector<TLike>;
+using TLikesType = unordered_set<TIdType>;
 using TBirthType = TTimestampType;
 using TCityType = string;
 using TCountryType = string;
@@ -53,8 +49,13 @@ struct TAccount {
     TJoinedType Joined; // timestamp 01.01.2011 <= x <= 01.01.2018
 };
 
+
+using TEmailDomainType = string;
 using TEmailKeysType = unordered_map<TEmailType, TAccount*>;
+using TEmailDomainKeysType = unordered_map<TEmailDomainType, TAccount*>;
+using TIdKeysType = unordered_map<TIdType, TAccount*>;
 using TPhoneKeysType = unordered_map<TPhoneType , TAccount*>;
+using TLikesKeysType = unordered_map<TAccount* , vector<TAccount*> >;
 using TAccountsType = vector<TAccount*>;
 
 
@@ -65,18 +66,25 @@ class TDatabase {
 public:
     bool LoadFromFile(const std::string& filePath);
     void Dump();
-    void ParseJsonWorker(const TAccountsJsonArray& accounts, size_t start, size_t end);
     void ParseJsonAccount(const TAccountJson& jsonAcc);
+    void PrepareKeys();
     ~TDatabase();
 private:
+    void ParseJsonWorker(const TAccountsJsonArray& accounts, size_t start, size_t end);
+    void PrepareLikesKeys(TAccount* account);
+
     TAccountsType Accounts;
     TEmailKeysType EmailKeys;
+    TEmailKeysType EmailDomainKeys;
+    TIdKeysType IdKeys;
     TPhoneKeysType PhoneKeys;
+    TLikesKeysType LikesKeys;
     size_t FileReadBlockSize = 10;
     mutex InsertDataMtx;
     mutex ThreadMtx;
     condition_variable ThreadWaitCond;
     TAtomicUint ReadThreadCount;
+
 
 
 };

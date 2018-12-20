@@ -5,6 +5,7 @@
 #include <thread>
 #include "profile_tool.h"
 #include "db.h"
+#include "tools.h"
 
 namespace HLC {
 bool TDatabase::LoadFromFile(const std::string& filePath) {
@@ -16,10 +17,6 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
     Document document;
     document.ParseStream<0, UTF8<>, FileReadStream>(is);
     const auto& accounts = document["accounts"].GetArray();
-    {
-        unique_lock<mutex> addLock(InsertDataMtx);
-        Accounts.reserve(Accounts.size() + accounts.Size());
-    }
     ReadThreadCount = 0;
     const auto maxThreadCount = thread::hardware_concurrency();
 
@@ -30,15 +27,11 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
         size_t end = i >= accountsSize ? accountsSize : i;
 
         if(ReadThreadCount > maxThreadCount) {
-//            std::cout << "i'm wait" << endl;
             unique_lock<mutex> lock(ThreadMtx);
             ThreadWaitCond.wait(lock, [&]() { return ReadThreadCount <= maxThreadCount;});
         }
         ReadThreadCount++;
         thread(&TDatabase::ParseJsonWorker, this, accounts, start, end).detach();
-//        cout << "start: " << start << ", end: " << end << endl;
-
-
     }
     unique_lock<mutex> lock(ThreadMtx);
     ThreadWaitCond.wait(lock, [&]() {return ReadThreadCount == 0;});
@@ -47,7 +40,6 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
 
 void TDatabase::ParseJsonWorker(const TAccountsJsonArray& accounts, size_t start, size_t end) {
     for(size_t i = start; i < end; ++i) {
-//        cout << "start with " << i << endl;
         ParseJsonAccount(accounts[i]);
     }
     ReadThreadCount--;
@@ -60,7 +52,7 @@ void TDatabase::ParseJsonAccount(const TAccountJson& jsonAcc) {
     if(EmailKeys.find(email) != EmailKeys.end()) {
         return;
     }
-    TPhoneType phone = "";
+    TPhoneType phone;
     if(jsonAcc.HasMember("phone")) {
         phone = jsonAcc["phone"].GetString();
         if (PhoneKeys.find(phone) != PhoneKeys.end()) {
@@ -68,8 +60,13 @@ void TDatabase::ParseJsonAccount(const TAccountJson& jsonAcc) {
         }
     }
 
+    auto id = static_cast<TIdType>(jsonAcc["id"].GetInt());
+    if(IdKeys.find(id) != IdKeys.end()) {
+        return;;
+    }
+
     auto account = new TAccount {
-            static_cast<TIdType>(jsonAcc["id"].GetInt()),
+            id,
             jsonAcc.HasMember("fname") ? jsonAcc["fname"].GetString() : "",
             jsonAcc.HasMember("sname") ? jsonAcc["sname"].GetString() : "",
             jsonAcc["email"].GetString(),
@@ -79,7 +76,7 @@ void TDatabase::ParseJsonAccount(const TAccountJson& jsonAcc) {
             jsonAcc.HasMember("premium") ? static_cast<TPremiumTimeType>(jsonAcc["premium"]["finish"].GetInt()) : 0,
             jsonAcc["sex"].GetString()[0] != 'f', // quite sexism
             jsonAcc.HasMember("phone") ? jsonAcc["phone"].GetString() : "",
-            {jsonAcc.HasMember("likes") ? jsonAcc["likes"].GetArray().Size() : 0, TLike()},
+            {},
             static_cast<TIdType>(jsonAcc["birth"].GetInt()),
             jsonAcc.HasMember("city") ? jsonAcc["city"].GetString() : "",
             jsonAcc.HasMember("country") ? jsonAcc["country"].GetString() : "",
@@ -97,20 +94,47 @@ void TDatabase::ParseJsonAccount(const TAccountJson& jsonAcc) {
     if(jsonAcc.HasMember("likes")) {
         const auto& likes = jsonAcc["likes"].GetArray();
         for(size_t j = 0; j < likes.Size(); ++j) {
-            account->Likes[j].Id =  static_cast<TIdType>(likes[j]["id"].GetUint());
-            account->Likes[j].Ts =  static_cast<TTimestampType>(likes[j]["id"].GetUint());
+            account->Likes.insert(static_cast<TIdType>(likes[j]["id"].GetUint()));
         }
     }
 
     unique_lock<mutex> lock(InsertDataMtx);
-    Accounts.emplace_back(account);
-    EmailKeys[email] = account;
-    PhoneKeys[phone] = account;
+    Accounts.push_back(account);
+    IdKeys[id] = account;
+
+
+}
+
+void TDatabase::PrepareKeys() {
+    EXEC_TIME("PrepareKeys");
+    Accounts.reserve(IdKeys.size());
+    EmailKeys.reserve(IdKeys.size());
+    EmailDomainKeys.reserve(IdKeys.size());
+
+    for(const auto& accPtr: Accounts) {
+        PrepareLikesKeys(accPtr);
+        EmailKeys[accPtr->Email] = accPtr;
+        EmailDomainKeys[HLC::Tools::extractEmailDomain(accPtr->Email)] = accPtr;
+        if(!accPtr->Phone.empty()) {
+            PhoneKeys[accPtr->Phone] = accPtr;
+        }
+    }
+    IdKeys.clear(); // that's only use to build LikesKey fast.
+
+}
+
+void TDatabase::PrepareLikesKeys(TAccount* account) {
+    for(const auto& e: account->Likes) {
+        auto likedAccount = IdKeys.find(e);
+        if (likedAccount != IdKeys.end()) {
+            LikesKeys[likedAccount->second].push_back(account);
+        }
+    }
 }
 
 
 void TDatabase::Dump() {
-    std::cout << "smth=" << Accounts.size() << std::endl;
+    std::cout << "accountsSize=" << Accounts.size() << std::endl;
 //    for(const auto& acc: Accounts) {
 //        std::cout
 //            << "id: " << std::to_string(acc->Id)

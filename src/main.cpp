@@ -56,6 +56,7 @@ extern "C" {
 };
 
 #include <SQLiteCpp/Database.h>
+#include "tools.h"
 
 namespace utils {
 
@@ -863,15 +864,25 @@ void db_test() {
   }
 }
 
+void tools_test() {
+  assert(HLC::Tools::extractEmailDomain("atata@icloud.com") == "icloud.com");
+  assert(HLC::Tools::extractEmailDomain("atata@yandex.net") == "yandex.net");
+  assert(HLC::Tools::extractEmailDomain("herovaya") == "herovaya");
+  assert(HLC::Tools::extractEmailDomain("@") == "");
+  assert(HLC::Tools::extractEmailDomain("") == "");
+}
+
 int main(int argc, char* argv[]) {
 
   db_test();
+  tools_test();
 //  fifo_test();
  HLC::TDatabase db;
  for (auto i = 1; i < argc; ++i) {
    db.LoadFromFile(argv[i]);
  }
- db.Dump();
+// db.Dump();
+ db.PrepareKeys();
 // run_tcp_pool_server();
   return 0;
 }
