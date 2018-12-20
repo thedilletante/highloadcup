@@ -22,7 +22,7 @@ RUN yum install -y centos-release-scl && \
 RUN yum install -y unzip
 
 ADD     CMakeLists.txt .
-ADD     main.cpp .
+ADD     src src
 
 WORKDIR /root/highloadcup/build
 ADD     run.sh .
