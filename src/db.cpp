@@ -42,7 +42,7 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
     return true;
 }
 
-void TDatabase::ParseJsonWorker(const rapidjson::Value& accounts, size_t start, size_t end) {
+void TDatabase::ParseJsonWorker(const TAccountsJsonArray& accounts, size_t start, size_t end) {
 
     for(size_t i = start; i < end; ++i) {
         cout << "internal start: " << start << ", end: " << end << ", pos: " << i << endl;
@@ -54,7 +54,7 @@ void TDatabase::ParseJsonWorker(const rapidjson::Value& accounts, size_t start, 
 }
 
 
-void TDatabase::ParseJsonAccount(const rapidjson::Value& jsonAcc) {
+void TDatabase::ParseJsonAccount(const TAccountJson& jsonAcc) {
     TEmailType email = jsonAcc["email"].GetString();
     if(EmailKeys.find(email) != EmailKeys.end()) {
         return;

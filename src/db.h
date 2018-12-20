@@ -32,6 +32,8 @@ using TCityType = string;
 using TCountryType = string;
 using TJoinedType = TTimestampType;
 
+using TAtomicUint = atomic<uint8_t>;
+
 
 struct TAccount {
     TIdType Id;
@@ -54,12 +56,17 @@ struct TAccount {
 using TEmailKeysType = unordered_map<TEmailType, TAccount*>;
 using TPhoneKeysType = unordered_map<TPhoneType , TAccount*>;
 using TAccountsType = vector<TAccount*>;
+
+
+using TAccountsJsonArray = rapidjson::GenericArray<false, typename rapidjson::Document::ValueType>;
+using TAccountJson = TAccountsJsonArray::ValueType;
+
 class TDatabase {
 public:
     bool LoadFromFile(const std::string& filePath);
     void Dump();
-    void ParseJsonWorker(const rapidjson::Value& accounts, size_t start, size_t end);
-    void ParseJsonAccount(const rapidjson::Value& jsonAcc);
+    void ParseJsonWorker(const TAccountsJsonArray& accounts, size_t start, size_t end);
+    void ParseJsonAccount(const TAccountJson& jsonAcc);
     ~TDatabase();
 private:
     TAccountsType Accounts;
@@ -69,7 +76,7 @@ private:
     mutex InsertDataMtx;
     mutex ThreadMtx;
     condition_variable ThreadWaitCond;
-    atomic_uint8_t ReadThreadCount;
+    TAtomicUint ReadThreadCount;
 
 
 };
