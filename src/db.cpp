@@ -46,6 +46,7 @@ void TDatabase::ParseJsonWorker(const rapidjson::Value& accounts, size_t start, 
 
     for(size_t i = start; i < end; ++i) {
         cout << "internal start: " << start << ", end: " << end << ", pos: " << i << endl;
+        cout << "size: " << accounts.Size() << endl;
         ParseJsonAccount(accounts[i]);
     }
     ReadThreadCount--;
