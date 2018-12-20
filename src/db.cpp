@@ -19,19 +19,20 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
     Accounts.reserve(accounts.Size());
     ReadThreadCount = 0;
     const auto threadPoolSize = thread::hardware_concurrency();
-    cout << threadPoolSize << endl;
+    cout << accounts.Size() << endl;
 
     const auto accountsSize = accounts.Size();
     for(uint64_t i = 0; i < accountsSize;) {
         auto start = i;
         i+=FileReadBlockSize;
         auto end = i >= accountsSize ? accountsSize : i;
+        cout << "start: " << start << ", end: " << end << endl;
+
         if(ReadThreadCount <= threadPoolSize) {
             ReadThreadCount++;
-            cout << i << endl;
 //            thread(&TDatabase::ParseJsonWorker, this, accounts[i], start, end).detach();
-            ParseJsonWorker(accounts[i], start, end);
-        } else {
+            ParseJsonWorker(accounts, start, end);
+//        } else {
 //            unique_lock<mutex> lock(ThreadMtx);
 //            ThreadWaitCond.wait(lock, [&]() { return ReadThreadCount <= threadPoolSize;});
         }
@@ -42,7 +43,9 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
 }
 
 void TDatabase::ParseJsonWorker(const rapidjson::Value& accounts, size_t start, size_t end) {
+
     for(size_t i = start; i < end; ++i) {
+        cout << "internal start: " << start << ", end: " << end << ", pos: " << i << endl;
         ParseJsonAccount(accounts[i]);
     }
     ReadThreadCount--;
@@ -55,6 +58,7 @@ void TDatabase::ParseJsonAccount(const rapidjson::Value& jsonAcc) {
     if(EmailKeys.find(email) != EmailKeys.end()) {
         return;
     }
+    cout << email << endl;
 
     TPhoneType phone = "";
     if(jsonAcc.HasMember("phone")) {
