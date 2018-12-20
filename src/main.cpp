@@ -866,12 +866,11 @@ void db_test() {
 int main(int argc, char* argv[]) {
 
   db_test();
- for (auto i = 1; i < argc; ++i) {
-   fprintf(stdout, "file provided: %s\n", argv[i]);
- }
 //  fifo_test();
  HLC::TDatabase db;
- db.LoadFromFile("/home/sildtm/Projects/personal/highloadcup/dataset/data/accounts_1.json");
+ for (auto i = 1; i < argc; ++i) {
+   db.LoadFromFile(argv[i]);
+ }
  db.Dump();
 // run_tcp_pool_server();
   return 0;

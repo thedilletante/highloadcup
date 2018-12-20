@@ -16,7 +16,7 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
     Document document;
     document.ParseStream<0, UTF8<>, FileReadStream>(is);
     const Value& accounts = document["accounts"].GetArray();
-    Accounts.reserve(accounts.Size());
+    Accounts.reserve(Accounts.size() + accounts.Size());
     for(uint64_t i = 0; i < accounts.Size(); ++i) {
         ParseJsonAccount(accounts[i]);
     }
