@@ -41,6 +41,11 @@
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/signal_set.hpp>
 
+
+#include <boost/algorithm/string.hpp>
+
+#include <sqlite3.h>
+
 #define BOOST_RESULT_OF_USE_TR1 1
 #include <boost/spirit/include/qi.hpp>
 #include <boost/fusion/include/std_pair.hpp>
@@ -591,49 +596,15 @@ namespace http {
 
 namespace application {
 
-  namespace requests {
-    struct filter {
-
-    };
-
-    struct group {
-
-    };
-
-    struct recommended {
-
-    };
-
-    struct suggest {
-
-    };
-
-    struct update {
-
-    };
-
-    struct add {
-
-    };
-
-    struct like {
-
-    };
-  }
-
-  using request = boost::variant<
-    requests::filter,
-    requests::group,
-    requests::recommended,
-    requests::suggest,
-    requests::update,
-    requests::add,
-    requests::like
-  >;
-
   struct response {
 
   };
+
+
+  static std::atomic_flag dbInUse ( ATOMIC_FLAG_INIT );
+
+  std::mutex dbInUseMutex;
+
 
   template <size_t BUFFER_SIZE>
   class tcp_pool_request_handler
@@ -642,7 +613,11 @@ namespace application {
 
     using parsed = http::parser<BUFFER_SIZE>;
 
+    explicit tcp_pool_request_handler(SQLite::Database& db)
+      : db(db) {}
+
     void on_request_ready() override {
+
       static const std::string end = "\r\n";
 
       http::ResponseBuilder builder;
@@ -655,48 +630,45 @@ namespace application {
       builder.set_major_version(1);
       builder.set_minor_version(1);
 
-      builder.set_status(200);
-
-      json.AddMember("method", rapidjson::Value(parsed::method), json.GetAllocator());
-
-      if (parsed::path != nullptr) {
-        json.AddMember("path", rapidjson::Value(parsed::path, parsed::path_length), json.GetAllocator());
+      std::string path(parsed::path, parsed::path_length);
+      std::vector<std::string> path_params;
+      boost::trim_if(path, boost::is_any_of("/"));
+      boost::split(path_params, path, boost::is_any_of("/"), boost::token_compress_on);
+      for (const auto& param : path_params) {
+        fprintf(stdout, "parameters %s\n", param.c_str());
       }
+      if (path_params.size() < 2) {
+        fprintf(stdout, "path consist of %d elements\n", path_params.size());
+        builder.set_status(404);
+      } else if (path_params[0] != "accounts") {
+        fprintf(stdout, "first parameter is not accounts: %s\n", path_params[0].c_str());
+        builder.set_status(404);
+      } else switch (parsed::method) {
+        case HTTP_GET: {
+          if (path_params.size() == 2 && path_params[1] == "filter") {
+            builder.set_status(handleFilter(json));
+          } else if (path_params.size() == 2 && path_params[1] == "group") {
 
-      if (parsed::headers_length > 0) {
-        rapidjson::Value headers(rapidjson::kArrayType);
-        for (size_t i = 0; i < parsed::headers_length; ++i) {
-          rapidjson::Value header(rapidjson::kObjectType);
-          header.AddMember(
-            rapidjson::Value(parsed::headers[i].key, parsed::headers[i].key_length),
-            rapidjson::Value(parsed::headers[i].value, parsed::headers[i].value_length),
-            json.GetAllocator());
-          headers.PushBack(header.Move(), json.GetAllocator());
+          } else if (path_params.size() == 3 && path_params[2] == "recommend") {
+
+          } else if (path_params.size() == 3 && path_params[2] == "suggest") {
+
+          } else {
+            fprintf(stdout, "unknown parameters %d, %s\n", path_params.size(), path_params[1].c_str());
+            builder.set_status(404);
+          }
+          break;
         }
-        json.AddMember("headers", headers.Move(), json.GetAllocator());
-      }
-
-      if (parsed::params_length > 0) {
-        rapidjson::Value params(rapidjson::kArrayType);
-        for (size_t i = 0; i < parsed::params_length; ++i) {
-          rapidjson::Value param(rapidjson::kObjectType);
-          param.AddMember(
-            rapidjson::Value(parsed::query_params[i].key, json.GetAllocator()).Move(),
-            parsed::query_params[i].val ? rapidjson::Value(parsed::query_params[i].val, json.GetAllocator()).Move() : rapidjson::Value().Move(),
-            json.GetAllocator()
-          );
-          params.PushBack(param.Move(), json.GetAllocator());
-        }
-        json.AddMember("params", params.Move(), json.GetAllocator());
-      }
-
-      if (parsed::body_position != nullptr) {
-        json.AddMember("body", rapidjson::Value(parsed::body_position, parsed::body_length), json.GetAllocator());
+        case HTTP_POST:
+        default:
+          fprintf(stdout, "unknown method %d\n", parsed::method);
+          builder.set_status(404);
+          break;
       }
 
       json.Accept(writer);
 
-      builder.headers()["Connection-Type"] = "application/json";
+      builder.headers()["Connection-Type"] = "application/json; charset=utf-8";
       builder.headers()["Connection-Length"] = std::to_string(strbuf.GetSize());
       builder.headers()["Connection"] = "close";
 
@@ -706,17 +678,339 @@ namespace application {
       http::parser<BUFFER_SIZE>::close();
 
     }
+
+  private:
+    int handleFilter(rapidjson::Document& json) {
+      std::vector<std::string> fields;
+      std::vector<std::string> filters;
+      std::vector<std::function<void(SQLite::Statement&, int)>> binders;
+      std::vector<std::function<void(SQLite::Statement&, rapidjson::Value&, int)>> inserters;
+      boost::optional<unsigned> limit;
+
+      for (size_t i = 0; i < parsed::params_length; ++i) {
+        const std::string name(parsed::query_params[i].key);
+        const std::string value(parsed::query_params[i].val);
+
+        if (name == "limit") {
+          if (auto limit_candidate = std::stoi(value)) {
+            if (limit_candidate > 0)
+              limit = limit_candidate;
+          }
+        } else {
+          std::vector<std::string> filter_params;
+          boost::split(filter_params, name, boost::is_any_of("_"));
+          for (auto& param: filter_params)
+            fprintf(stdout, "filter param: %s\n", param.c_str());
+          fprintf(stdout, "value is: %s\n", value.c_str());
+
+          if (filter_params.size() != 2) {
+            return 404;
+          }
+
+          const auto& filter_name = filter_params[0];
+          const auto& filter_op = filter_params[1];
+
+          if (filter_name == "sex") {
+            if (filter_op != "eq") {
+              return 404;
+            }
+
+            if (value != "m" && value != "f") {
+              return 404;
+            }
+
+            fields.emplace_back("sex");
+            filters.emplace_back("sex = ?");
+            binders.emplace_back([value](SQLite::Statement& st, int index){
+              st.bind(index, value == "m" ? 1 : 0);
+            });
+            inserters.emplace_back([&json](SQLite::Statement& s, rapidjson::Value& v, int column) {
+              v.AddMember("sex", s.getColumn(column).getInt() == 0 ? "f" : "m", json.GetAllocator());
+            });
+          } else if (filter_name == "email") {
+            if (filter_op == "lt") {
+              filters.emplace_back("email < ?");
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "gt") {
+              filters.emplace_back("email > ?");
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "domain") {
+              filters.emplace_back("email like ?");
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, "%@" + value);
+              });
+            } else {
+              return 404;
+            }
+          } else if (filter_name == "status") {
+            int mapping = 0;
+            if (value == "заняты") {
+              mapping = 1;
+            } else if (value == "все сложно") {
+              mapping = 2;
+            } else if (value != "свободны") {
+              return 404;
+            }
+
+            if (filter_op == "eq") {
+              filters.emplace_back("status = ?");
+            } else if (filter_op == "neq") {
+              filters.emplace_back("status != ?");
+            } else {
+              return 404;
+            }
+            fields.emplace_back("status");
+            binders.emplace_back([mapping](SQLite::Statement& st, int index){
+              st.bind(index, mapping);
+            });
+            inserters.emplace_back([&json](SQLite::Statement& s, rapidjson::Value& v, int column){
+              auto status = s.getColumn(column).getString();
+              v.AddMember("status", rapidjson::Value(status.c_str(), status.size(), json.GetAllocator()).Move(), json.GetAllocator());
+            });
+          } else if (filter_name == "fname") {
+            if (filter_op == "eq") {
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value);
+              });
+              filters.emplace_back("fname = ?");
+            } else if (filter_op == "any") {
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value);
+              });
+              filters.emplace_back("fname IN (?)");
+            } else if (filter_op == "null") {
+              if (value == "0") {
+                filters.emplace_back("fname IS NOT NULL");
+              } else if (value == "1") {
+                filters.emplace_back("fname IS NULL");
+              } else {
+                return 404;
+              }
+            } else {
+              return 404;
+            }
+            fields.emplace_back("fname");
+            inserters.emplace_back([&json](SQLite::Statement& s, rapidjson::Value& v, int column){
+              auto fname = s.getColumn(column).getString();
+              v.AddMember("fname", rapidjson::Value(fname.c_str(), fname.size(), json.GetAllocator()).Move(), json.GetAllocator());
+            });
+          } else if (filter_name == "sname") {
+            if (filter_op == "eq") {
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value);
+              });
+              filters.emplace_back("sname = ?");
+            } else if (filter_op == "starts") {
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value + "%");
+              });
+              filters.emplace_back("sname LIKE ?");
+            } else if (filter_op == "null") {
+              if (value == "0") {
+                filters.emplace_back("sname IS NOT NULL");
+              } else if (value == "1") {
+                filters.emplace_back("sname IS NULL");
+              } else {
+                return 404;
+              }
+            } else {
+              return 404;
+            }
+            fields.emplace_back("sname");
+            inserters.emplace_back([&json](SQLite::Statement& s, rapidjson::Value& v, int column){
+              auto fname = s.getColumn(column).getString();
+              v.AddMember("sname", rapidjson::Value(fname.c_str(), fname.size(), json.GetAllocator()).Move(), json.GetAllocator());
+            });
+          } else if (filter_name == "phone") {
+            if (filter_op == "code") {
+              filters.emplace_back("phone LIKE _?____________");
+              binders.emplace_back([value](SQLite::Statement &st, int index) {
+                st.bind(index, value);
+              });
+            } else if (filter_op == "null") {
+              if (value == "0") {
+                filters.emplace_back("phone IS NOT NULL");
+              } else if (value == "1") {
+                filters.emplace_back("phone IS NULL");
+              } else {
+                return 404;
+              }
+            } else {
+              return 404;
+            }
+            fields.emplace_back("phone");
+            inserters.emplace_back([&json](SQLite::Statement &s, rapidjson::Value &v, int column) {
+              auto value = s.getColumn(column).getString();
+              v.AddMember("phone", rapidjson::Value(value.c_str(), value.size(), json.GetAllocator()).Move(), json.GetAllocator());
+            });
+          } else if (filter_name == "country") {
+            if (filter_op == "eq") {
+              filters.emplace_back("country = ?");
+              binders.emplace_back([value](SQLite::Statement &st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "null") {
+              if (value == "0") {
+                filters.emplace_back("country IS NOT NULL");
+              } else if (value == "1") {
+                filters.emplace_back("country IS NULL");
+              } else {
+                return 404;
+              }
+            } else {
+              return 404;
+            }
+            fields.emplace_back("country");
+            inserters.emplace_back([&json](SQLite::Statement &s, rapidjson::Value &v, int column) {
+              auto value = s.getColumn(column).getString();
+              v.AddMember("country", rapidjson::Value(value.c_str(), value.size(), json.GetAllocator()).Move(), json.GetAllocator());
+            });
+          } else if (filter_name == "city") {
+            if (filter_op == "eq") {
+              filters.emplace_back("city = ?");
+              binders.emplace_back([value](SQLite::Statement &st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "eny") {
+              filters.emplace_back("city IN (?)");
+              binders.emplace_back([value](SQLite::Statement& st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "null") {
+              if (value == "0") {
+                filters.emplace_back("city IS NOT NULL");
+              } else if (value == "1") {
+                filters.emplace_back("city IS NULL");
+              } else {
+                return 404;
+              }
+            } else {
+              return 404;
+            }
+            fields.emplace_back("city");
+            inserters.emplace_back([&json](SQLite::Statement &s, rapidjson::Value &v, int column) {
+              auto value = s.getColumn(column).getString();
+              v.AddMember("city", rapidjson::Value(value.c_str(), value.size(), json.GetAllocator()).Move(), json.GetAllocator());
+            });
+          } else if (filter_name == "birth") {
+            if (filter_op == "lt") {
+
+              filters.emplace_back("birth < ?");
+              binders.emplace_back([value](SQLite::Statement &st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "gt") {
+              filters.emplace_back("birth > ?");
+              binders.emplace_back([value](SQLite::Statement &st, int index){
+                st.bind(index, value);
+              });
+            } else if (filter_op == "year") {
+//              const auto year = std::stoi(value);
+//              if (year < 1950) {
+//                return 0;
+//              }
+//
+//              const auto diff = std::chrono::duration_cast<std::chrono::seconds>(
+//                  std::chrono::
+//                )
+
+            } else {
+              return 404;
+            }
+            fields.emplace_back("birth");
+            inserters.emplace_back([&json](SQLite::Statement& s, rapidjson::Value& v, int column){
+              v.AddMember("birth", s.getColumn(column).getInt(), json.GetAllocator());
+            });
+          } else if (filter_name == "interests") {
+            if (filter_op == "contains") {
+
+            } else if (filter_op == "any") {
+
+            } else {
+              return 404;
+            }
+          } else if (filter_name == "likes") {
+            if (filter_op == "contains") {
+
+            } else {
+              return 404;
+            }
+          } else if (filter_name == "premium") {
+            if (filter_op == "now") {
+
+            } else if (filter_op == "null") {
+
+            } else {
+              return 404;
+            }
+          } else {
+            return 404;
+          }
+        }
+      }
+
+      if (!limit)
+        return 404;
+
+
+      std::string query = "SELECT id, email";
+      for (const auto& field : fields) {
+        query += ", " + field;
+      }
+      query += " FROM accounts WHERE 1=1";
+
+      for (const auto& filter : filters) {
+        query += " AND " + filter;
+      }
+
+      query += " LIMIT " + std::to_string(*limit);
+
+      fprintf(stdout, "query: %s\n", query.c_str());
+
+      while (dbInUse.test_and_set(std::memory_order_acquire));
+
+      SQLite::Statement s(db, query);
+      for (int i = 0; i < binders.size(); ++i) {
+        binders[i](s, i + 1);
+      }
+
+      rapidjson::Value accounts(rapidjson::kArrayType);
+      while (s.executeStep()) {
+        rapidjson::Value account(rapidjson::kObjectType);
+        account.AddMember("id", s.getColumn(0).getInt(), json.GetAllocator());
+        const auto& email = s.getColumn(1).getString();
+        account.AddMember("email", rapidjson::Value(email.c_str(), email.size(), json.GetAllocator()).Move(), json.GetAllocator());
+        unsigned index = 1;
+        for (auto& inserter : inserters) {
+          inserter(s, account, ++index);
+        }
+        accounts.PushBack(account.Move(), json.GetAllocator());
+      }
+      json.AddMember("accounts", accounts.Move(), json.GetAllocator());
+
+      dbInUse.clear(std::memory_order_release);
+
+      return 200;
+    }
+
+  private:
+    SQLite::Database& db;
   };
 
   template <size_t BUFFER_SIZE>
   class tcp_pool_request_handler_allocator
     : public tcp::connection_allocator<BUFFER_SIZE> {
   public:
-    explicit tcp_pool_request_handler_allocator(size_t connections_per_thread)
-      : allocator(connections_per_thread) {}
+    explicit tcp_pool_request_handler_allocator(size_t connections_per_thread, SQLite::Database& db)
+      : allocator(connections_per_thread)
+      , db(db) {}
 
     tcp::connection<BUFFER_SIZE> *allocate_and_build() override {
-      return allocator.allocate();
+      return allocator.allocate(db);
     }
 
     void deallocate(tcp::connection<BUFFER_SIZE> *c) override {
@@ -725,26 +1019,29 @@ namespace application {
 
   private:
     utils::simple_allocator<tcp_pool_request_handler<BUFFER_SIZE>> allocator;
+    SQLite::Database& db;
   };
 
   template <size_t BUFFER_SIZE>
   class tcp_pool_request_hander_allocator_creator
     : public tcp::connection_allocator_creator<BUFFER_SIZE> {
   public:
-    explicit tcp_pool_request_hander_allocator_creator(size_t connections_per_thread)
-      : connections_per_thread(connections_per_thread) {}
+    explicit tcp_pool_request_hander_allocator_creator(size_t connections_per_thread, const std::string& db_name)
+      : connections_per_thread(connections_per_thread)
+      , db(db_name, SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE | SQLITE_OPEN_NOMUTEX) {}
 
     std::unique_ptr<tcp::connection_allocator<BUFFER_SIZE>> create() override {
-      return std::unique_ptr<tcp::connection_allocator<BUFFER_SIZE>>(new tcp_pool_request_handler_allocator<BUFFER_SIZE>(connections_per_thread));
+      return std::unique_ptr<tcp::connection_allocator<BUFFER_SIZE>>(new tcp_pool_request_handler_allocator<BUFFER_SIZE>(connections_per_thread, db));
     }
 
   private:
     const size_t connections_per_thread;
+    SQLite::Database db;
   };
 
 }
 
-void run_tcp_pool_server() {
+void run_tcp_pool_server(const std::string& db_name) {
   uint16_t port = 8080;
 
   if (auto envPortValue = getenv("HIGHLOADCUP_PORT")) {
@@ -767,7 +1064,7 @@ void run_tcp_pool_server() {
       port,
       backlog,
       std::unique_ptr<tcp::connection_allocator_creator<buffer_size>>(
-        new application::tcp_pool_request_hander_allocator_creator<buffer_size>(connections_per_thread)
+        new application::tcp_pool_request_hander_allocator_creator<buffer_size>(connections_per_thread, db_name)
       )
     );
 
@@ -838,8 +1135,6 @@ void fifo_test() {
   assert(fifo.load(&load) == false);
 }
 
-#include <sqlite3.h>
-
 void db_test() {
   SQLite::Database db("example.db3", SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
 
@@ -873,16 +1168,21 @@ void tools_test() {
 }
 
 int main(int argc, char* argv[]) {
-
-  db_test();
-  tools_test();
+//  db_test();
+//  tools_test();
 //  fifo_test();
- HLC::TDatabase db;
- for (auto i = 1; i < argc; ++i) {
-   db.LoadFromFile(argv[i]);
- }
+// HLC::TDatabase db;
+// for (auto i = 1; i < argc; ++i) {
+//   db.LoadFromFile(argv[i]);
+// }
 // db.Dump();
- db.PrepareKeys();
-// run_tcp_pool_server();
+// db.PrepareKeys();
+
+  if (argc < 2) {
+    std::cout << "usage: " << argv[0] << " db_filename" << std::endl;
+    return 1;
+  }
+
+ run_tcp_pool_server(argv[1]);
   return 0;
 }

@@ -15,26 +15,30 @@ bool TDatabase::LoadFromFile(const std::string& filePath) {
     char buffer[65536];
     FileReadStream is(pFile, buffer, sizeof(buffer));
     Document document;
-    document.ParseStream<0, UTF8<>, FileReadStream>(is);
+    {
+        EXEC_TIME("parsing");
+        document.ParseStream<0, UTF8<>, FileReadStream>(is);
+    }
     const auto& accounts = document["accounts"].GetArray();
     ReadThreadCount = 0;
     const auto maxThreadCount = thread::hardware_concurrency();
 
     const auto accountsSize = accounts.Size();
-    for(uint64_t i = 0; i <= accountsSize;) {
-        size_t start = i;
-        i+=FileReadBlockSize;
-        size_t end = i >= accountsSize ? accountsSize : i;
+    // for(uint64_t i = 0; i <= accountsSize;) {
+    //     size_t start = i;
+    //     i+=FileReadBlockSize;
+    //     size_t end = i >= accountsSize ? accountsSize : i;
 
-        if(ReadThreadCount > maxThreadCount) {
-            unique_lock<mutex> lock(ThreadMtx);
-            ThreadWaitCond.wait(lock, [&]() { return ReadThreadCount <= maxThreadCount;});
-        }
-        ReadThreadCount++;
-        thread(&TDatabase::ParseJsonWorker, this, accounts, start, end).detach();
-    }
-    unique_lock<mutex> lock(ThreadMtx);
-    ThreadWaitCond.wait(lock, [&]() {return ReadThreadCount == 0;});
+    //     if(ReadThreadCount > maxThreadCount) {
+    //         unique_lock<mutex> lock(ThreadMtx);
+    //         ThreadWaitCond.wait(lock, [&]() { return ReadThreadCount <= maxThreadCount;});
+    //     }
+    //     ReadThreadCount++;
+    //     thread(&TDatabase::ParseJsonWorker, this, accounts, start, end).detach();
+    // }
+    // unique_lock<mutex> lock(ThreadMtx);
+    // ThreadWaitCond.wait(lock, [&]() {return ReadThreadCount == 0;});
+    ParseJsonWorker(accounts, 0, accountsSize);
     return true;
 }
 
